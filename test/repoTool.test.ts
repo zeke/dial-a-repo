@@ -128,4 +128,31 @@ describe("loadRepoContext", () => {
     expect(context.digest!.length).toBeLessThan(hugeContent.length);
     expect(context.digest).toContain("[...truncated for length...]");
   });
+
+  it("still includes file content when the tree alone exceeds the old combined budget", async () => {
+    // Regression test for the real bug found live: a large repo's tree can
+    // exceed a single combined char budget on its own, which meant
+    // truncating the concatenated blob left zero file content in the
+    // digest -- the model could describe structure but not any file's
+    // contents. Tree and content must be budgeted independently.
+    const hugeTree = "file.ts\n".repeat(3_000); // ~24,000 chars, alone bigger than the old 12,000 cap
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url.startsWith("https://gitingest.com/")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ tree: hugeTree, content: "FILE: README.md\n\nHello." }), {
+              status: 200,
+            })
+          );
+        }
+        return Promise.resolve(new Response("not found", { status: 404 }));
+      })
+    );
+
+    const context = await loadRepoContext("owner/repo");
+    expect(context.digest).toContain("FILE: README.md");
+    expect(context.digest).toContain("Hello.");
+  });
 });
