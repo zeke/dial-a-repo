@@ -16,10 +16,16 @@
  *    is out of scope for keeping this demo simple.
  */
 
-// Hard cap on the combined tree+content digest we hand to the model. A
-// phone call needs a summary to talk from, not an entire large repo's
-// source -- and keeping this small keeps the tool call fast and cheap.
-const MAX_DIGEST_CHARS = 12_000;
+// Separate caps for the tree and the content, not one cap on the
+// concatenated blob. A large repo's file tree alone can easily exceed a
+// single combined budget (e.g. cloudflare/computer's tree is ~21k chars
+// on its own) -- capping the combined string from the start meant the
+// digest could end up entirely tree, with zero file content ever
+// reaching the model. Budgeting each piece separately guarantees some
+// real file content always gets through. A phone call needs a summary
+// to talk from, not an entire large repo's source, so both stay small.
+const MAX_TREE_CHARS = 2_000;
+const MAX_CONTENT_CHARS = 10_000;
 
 export interface RepoInfo {
   description: string | null;
@@ -118,22 +124,28 @@ async function fetchRepoInfo(owner: string, repo: string): Promise<RepoInfo | nu
   }
 }
 
+function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}\n[...truncated for length...]` : text;
+}
+
 async function fetchDigest(owner: string, repo: string): Promise<string | null> {
   try {
     // max_file_size (KB) keeps gitingest from pulling in any single huge
-    // file; we still hard-truncate the combined result below regardless.
+    // file; we still truncate tree and content independently below
+    // regardless, since the total across all files can still be huge.
     const resp = await fetch(`https://gitingest.com/api/${owner}/${repo}?max_file_size=50`, {
       headers: { "User-Agent": "dial-a-repo" },
     });
     if (!resp.ok) return null;
 
     const data = await resp.json<{ summary?: string; tree?: string; content?: string }>();
-    const combined = [data.summary, data.tree, data.content].filter(Boolean).join("\n\n");
-    if (!combined) return null;
+    const parts = [
+      data.summary ?? null,
+      data.tree ? truncate(data.tree, MAX_TREE_CHARS) : null,
+      data.content ? truncate(data.content, MAX_CONTENT_CHARS) : null,
+    ].filter((part): part is string => Boolean(part));
 
-    return combined.length > MAX_DIGEST_CHARS
-      ? `${combined.slice(0, MAX_DIGEST_CHARS)}\n\n[...truncated for length...]`
-      : combined;
+    return parts.length > 0 ? parts.join("\n\n") : null;
   } catch {
     return null;
   }
