@@ -121,6 +121,55 @@ this demo needs. This project *does* use `@cloudflare/computer`, just its
 git client only (see below) -- clone, log, diff, show, no shell, no
 command execution of any kind.
 
+## Resolving bare project names (added 2026-08-08)
+
+Callers can say "react," "vite," or "cheerio" instead of the exact
+"owner/repo" -- `parseRepoSpec` returning `null` (no `/` found) is the
+signal to fall back to `searchRepoByName` in `src/repoTool.ts`, which
+hits GitHub's search API (`GET /search/repositories?q={name}+in:name
++fork:false&sort=stars&order=desc&per_page=5`) and prefers an exact
+`name` match (case-insensitive) among the top 5 results, falling back to
+the #1 result by stars if none match exactly.
+
+Verified live against the three names in the original request:
+`react` -> `react/react` (247k stars -- yes, really `react/react`, not
+`facebook/react`; `GET /repos/facebook/react` now 301s there, so Meta
+apparently moved/renamed the org at some point -- verify this kind of
+thing against the live API, not memory), `vite` -> `vitejs/vite` (82k),
+`cheerio` -> `cheeriojs/cheerio` (30k).
+
+Search results already come back in the same shape as a direct
+`GET /repos/{owner}/{repo}` response (same fields: `default_branch`,
+`size`, `topics`, `license`, etc.), so resolving a bare name costs the
+same one request as a direct lookup -- no extra round trip to fetch
+metadata separately. `mapRepoData` is shared between both code paths for
+exactly this reason.
+
+**Known sharp edge, not a bug:** star-sorted search without an exact
+match can pick something unexpected for genuinely ambiguous names --
+"docker" resolves to `sickcodes/Docker-OSX` (a script collection, most
+starred result whose name contains "docker") because there's no repo
+literally named "docker" in the top results at all; the real Docker
+engine lives at `moby/moby`. No amount of exact-match preference fixes
+this specific case since there's no exact match to prefer. Accepted as
+an inherent limitation of the approach rather than something to build a
+disambiguation flow around -- out of scope for what this demo needs.
+
+**Interacts with the size guard:** resolving "react" finds `react/react`
+at ~1 GB (`size` field), well over `RepoWorkspace`'s `MAX_REPO_SIZE_KB`
+(~200 MB) -- so `load_repo("react")` works fine (gitingest handles the
+digest, truncated as always), but `repo_recent_commits("react")` etc.
+correctly refuse to clone it live on a call. That's the guard doing its
+job, not a new bug, but worth knowing if a caller asks about a huge
+popular project and gets git-history questions declined.
+
+**Rate limit note:** GitHub's search endpoints have a stricter
+unauthenticated rate limit (10 requests/minute) than the regular REST
+API (60/hour... per the same-IP bucket already used by `fetchRepoInfo`).
+Only hit for bare-name input, at most once per such tool call -- fine at
+current volume, worth revisiting (a `GITHUB_TOKEN` secret would raise
+both limits substantially) if this gets called a lot.
+
 ## Real git tooling (added 2026-08-08)
 
 `load_repo`'s gitingest digest is a flat, truncated snapshot -- fine for

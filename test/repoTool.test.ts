@@ -34,11 +34,67 @@ describe("parseRepoSpec", () => {
 });
 
 describe("loadRepoContext", () => {
-  it("returns an error for unparseable input", async () => {
+  it("returns an error when a bare name matches no repo via search", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url.startsWith("https://api.github.com/search/repositories")) {
+          return Promise.resolve(new Response(JSON.stringify({ items: [] }), { status: 200 }));
+        }
+        return Promise.resolve(new Response("not found", { status: 404 }));
+      })
+    );
+
     const context = await loadRepoContext("not-a-repo");
     expect(context.error).toContain("not-a-repo");
     expect(context.info).toBeNull();
     expect(context.digest).toBeNull();
+  });
+
+  it("resolves a bare project name to the top matching repo via search", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url.startsWith("https://api.github.com/search/repositories")) {
+          expect(url).toContain("react");
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                items: [
+                  {
+                    name: "react",
+                    full_name: "react/react",
+                    description: "The library for web and native user interfaces.",
+                    language: "JavaScript",
+                    stargazers_count: 247_000,
+                    forks_count: 50_000,
+                    license: { name: "MIT License" },
+                    topics: ["react"],
+                    homepage: "https://react.dev",
+                    default_branch: "main",
+                    pushed_at: "2026-01-01T00:00:00Z",
+                    private: false,
+                    size: 5000,
+                  },
+                ],
+              }),
+              { status: 200 }
+            )
+          );
+        }
+        if (url.startsWith("https://gitingest.com/")) {
+          return Promise.resolve(new Response(JSON.stringify({ summary: "Repository: react/react" }), { status: 200 }));
+        }
+        return Promise.resolve(new Response("not found", { status: 404 }));
+      })
+    );
+
+    const context = await loadRepoContext("react");
+    expect(context.repo).toBe("react/react");
+    expect(context.error).toBeUndefined();
+    expect(context.info?.stars).toBe(247_000);
   });
 
   it("combines GitHub metadata and a gitingest digest", async () => {
@@ -197,9 +253,67 @@ describe("resolveCloneTarget", () => {
     });
   });
 
-  it("returns an error for input with no owner/repo", async () => {
+  it("returns an error for a bare name that matches no repo via search", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url.startsWith("https://api.github.com/search/repositories")) {
+          return Promise.resolve(new Response(JSON.stringify({ items: [] }), { status: 200 }));
+        }
+        return Promise.resolve(new Response("not found", { status: 404 }));
+      })
+    );
+
     const result = await resolveCloneTarget("not-a-repo");
     expect(result.ok).toBe(false);
+  });
+
+  it("resolves a bare project name via search for cloning", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url.startsWith("https://api.github.com/search/repositories")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                items: [
+                  {
+                    name: "vite",
+                    full_name: "vitejs/vite",
+                    description: null,
+                    language: "TypeScript",
+                    stargazers_count: 82_000,
+                    forks_count: 8_000,
+                    license: null,
+                    topics: [],
+                    homepage: null,
+                    default_branch: "main",
+                    pushed_at: null,
+                    private: false,
+                    size: 73_000,
+                  },
+                ],
+              }),
+              { status: 200 }
+            )
+          );
+        }
+        return Promise.resolve(new Response("not found", { status: 404 }));
+      })
+    );
+
+    const result = await resolveCloneTarget("vite");
+    expect(result).toEqual({
+      ok: true,
+      target: {
+        repo: "vitejs/vite",
+        cloneUrl: "https://github.com/vitejs/vite.git",
+        defaultBranch: "main",
+        sizeKb: 73_000,
+      },
+    });
   });
 
   it("returns an error when the repo doesn't exist", async () => {

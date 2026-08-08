@@ -67,31 +67,68 @@ export function parseRepoSpec(input: string): { owner: string; repo: string } | 
 
 export async function loadRepoContext(input: string): Promise<RepoContext> {
   const parsed = parseRepoSpec(input);
-  if (!parsed) {
+  if (parsed) {
+    // Direct owner/repo (or URL): fetch metadata and digest in parallel,
+    // and tolerate either one failing on its own -- a digest with no
+    // metadata (or vice versa) is still useful to hand back.
+    const repo = `${parsed.owner}/${parsed.repo}`;
+    const [info, digest] = await Promise.all([
+      fetchRepoInfo(parsed.owner, parsed.repo),
+      fetchDigest(parsed.owner, parsed.repo),
+    ]);
+    if (!info && !digest) {
+      return {
+        repo,
+        info: null,
+        digest: null,
+        error: `Could not find a public GitHub repo at "${repo}". It may not exist, may be private, or the name may be misspelled.`,
+      };
+    }
+    return { repo, info, digest };
+  }
+
+  // Bare project name (no "/") -- resolve via search first, which
+  // already returns full metadata, then fetch the digest for it.
+  const found = await searchRepoByName(input);
+  if (!found) {
     return {
       repo: input,
       info: null,
       digest: null,
-      error: `Could not find a GitHub owner/repo in "${input}". Ask the caller for it in "owner/repo" form or as a github.com URL.`,
+      error: `Could not find a public GitHub repo matching "${input}". Ask the caller for "owner/repo" or a github.com URL instead.`,
     };
   }
+  const digest = await fetchDigest(found.owner, found.repo);
+  return { repo: `${found.owner}/${found.repo}`, info: found.info, digest };
+}
 
-  const repo = `${parsed.owner}/${parsed.repo}`;
-  const [info, digest] = await Promise.all([
-    fetchRepoInfo(parsed.owner, parsed.repo),
-    fetchDigest(parsed.owner, parsed.repo),
-  ]);
+interface GitHubRepoData {
+  description: string | null;
+  language: string | null;
+  stargazers_count: number;
+  forks_count: number;
+  license: { name: string } | null;
+  topics: string[];
+  homepage: string | null;
+  default_branch: string;
+  pushed_at: string | null;
+  private: boolean;
+  size: number;
+}
 
-  if (!info && !digest) {
-    return {
-      repo,
-      info: null,
-      digest: null,
-      error: `Could not find a public GitHub repo at "${repo}". It may not exist, may be private, or the name may be misspelled.`,
-    };
-  }
-
-  return { repo, info, digest };
+function mapRepoData(data: GitHubRepoData): RepoInfo {
+  return {
+    description: data.description ?? null,
+    language: data.language ?? null,
+    stars: data.stargazers_count ?? 0,
+    forks: data.forks_count ?? 0,
+    license: data.license?.name ?? null,
+    topics: data.topics ?? [],
+    homepage: data.homepage || null,
+    defaultBranch: data.default_branch ?? "main",
+    pushedAt: data.pushed_at ?? null,
+    sizeKb: data.size ?? 0,
+  };
 }
 
 async function fetchRepoInfo(owner: string, repo: string): Promise<RepoInfo | null> {
@@ -101,70 +138,99 @@ async function fetchRepoInfo(owner: string, repo: string): Promise<RepoInfo | nu
     });
     if (!resp.ok) return null;
 
-    const data = await resp.json<{
-      description: string | null;
-      language: string | null;
-      stargazers_count: number;
-      forks_count: number;
-      license: { name: string } | null;
-      topics: string[];
-      homepage: string | null;
-      default_branch: string;
-      pushed_at: string | null;
-      private: boolean;
-      size: number;
-    }>();
-
+    const data = await resp.json<GitHubRepoData>();
     if (data.private) return null;
 
-    return {
-      description: data.description ?? null,
-      language: data.language ?? null,
-      stars: data.stargazers_count ?? 0,
-      forks: data.forks_count ?? 0,
-      license: data.license?.name ?? null,
-      topics: data.topics ?? [],
-      homepage: data.homepage || null,
-      defaultBranch: data.default_branch ?? "main",
-      pushedAt: data.pushed_at ?? null,
-      sizeKb: data.size ?? 0,
-    };
+    return mapRepoData(data);
   } catch {
     return null;
   }
 }
 
 /**
- * Resolves "owner/repo" or a GitHub URL down to what RepoWorkspace needs
- * to clone it: the clone URL, default branch, and size (to guard against
- * cloning something huge live on a call -- see MAX_REPO_SIZE_KB in
+ * Resolves a bare project name (no "/", so not "owner/repo" -- caller
+ * said something like "react" or "vite" instead of the exact repo) to
+ * the most popular matching public repo via GitHub's search API. Lets
+ * callers mention a well-known project without knowing its GitHub
+ * namespace. Picks the highest-starred result whose repo name matches
+ * exactly (case-insensitive) among the top few hits, falling back to
+ * the single top hit by stars if none match exactly -- good enough for
+ * well-known projects ("react" -> react/react, "vite" -> vitejs/vite),
+ * not guaranteed for generic or ambiguous names.
+ */
+async function searchRepoByName(name: string): Promise<{ owner: string; repo: string; info: RepoInfo } | null> {
+  try {
+    const query = encodeURIComponent(`${name} in:name fork:false`);
+    const resp = await fetch(
+      `https://api.github.com/search/repositories?q=${query}&sort=stars&order=desc&per_page=5`,
+      { headers: { "User-Agent": "dial-a-repo", Accept: "application/vnd.github+json" } }
+    );
+    if (!resp.ok) return null;
+
+    const data = await resp.json<{ items: (GitHubRepoData & { name: string; full_name: string })[] }>();
+    const candidates = (data.items ?? []).filter((item) => !item.private);
+    if (candidates.length === 0) return null;
+
+    const exactMatch = candidates.find((item) => item.name.toLowerCase() === name.trim().toLowerCase());
+    const best = exactMatch ?? candidates[0];
+
+    const [owner, repo] = best.full_name.split("/");
+    if (!owner || !repo) return null;
+
+    return { owner, repo, info: mapRepoData(best) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolves "owner/repo", a GitHub URL, or a bare project name (see
+ * searchRepoByName) down to what RepoWorkspace needs to clone it: the
+ * clone URL, default branch, and size (to guard against cloning
+ * something huge live on a call -- see MAX_REPO_SIZE_KB in
  * repoWorkspace.ts). Used by the git-backed tools (repo_recent_commits,
  * repo_file, repo_diff), which each need a real clone rather than
- * load_repo's flat digest.
+ * load_repo's flat digest. Unlike loadRepoContext, metadata is required
+ * here (not optional) -- there's nothing to clone without a resolved
+ * default branch.
  */
 export async function resolveCloneTarget(
   input: string
 ): Promise<{ ok: true; target: CloneTarget } | { ok: false; error: string }> {
   const parsed = parseRepoSpec(input);
-  if (!parsed) {
-    return { ok: false, error: `Could not find a GitHub owner/repo in "${input}".` };
-  }
-
-  const info = await fetchRepoInfo(parsed.owner, parsed.repo);
-  if (!info) {
+  if (parsed) {
+    const info = await fetchRepoInfo(parsed.owner, parsed.repo);
+    if (!info) {
+      return {
+        ok: false,
+        error: `Could not find a public GitHub repo at "${parsed.owner}/${parsed.repo}". It may not exist, may be private, or the name may be misspelled.`,
+      };
+    }
     return {
-      ok: false,
-      error: `Could not find a public GitHub repo at "${parsed.owner}/${parsed.repo}". It may not exist, may be private, or the name may be misspelled.`,
+      ok: true,
+      target: {
+        repo: `${parsed.owner}/${parsed.repo}`,
+        cloneUrl: `https://github.com/${parsed.owner}/${parsed.repo}.git`,
+        defaultBranch: info.defaultBranch,
+        sizeKb: info.sizeKb,
+      },
     };
   }
 
+  const found = await searchRepoByName(input);
+  if (!found) {
+    return {
+      ok: false,
+      error: `Could not find a public GitHub repo matching "${input}". Ask the caller for "owner/repo" or a github.com URL instead.`,
+    };
+  }
   return {
     ok: true,
     target: {
-      repo: `${parsed.owner}/${parsed.repo}`,
-      cloneUrl: `https://github.com/${parsed.owner}/${parsed.repo}.git`,
-      defaultBranch: info.defaultBranch,
-      sizeKb: info.sizeKb,
+      repo: `${found.owner}/${found.repo}`,
+      cloneUrl: `https://github.com/${found.owner}/${found.repo}.git`,
+      defaultBranch: found.info.defaultBranch,
+      sizeKb: found.info.sizeKb,
     },
   };
 }
