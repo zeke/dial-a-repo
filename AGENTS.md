@@ -18,24 +18,23 @@ behind -- see the README's "Extra credit" section for the list, and
 `ziki-voice-agent`'s own `AGENTS.md` for how those features actually work
 if this project ever needs to grow into them.
 
-## Status (as of 2026-08-07)
+## Status (as of 2026-08-08)
 
-**Code complete, not yet deployed/cut over.** Typecheck, lint, and all
-tests pass locally. The phone number **+1 (607) 365-4321** is reused from
-`ziki-voice-agent` (see "Reusing the existing phone number" below) but as
-of this writing xAI's `byo_trunk` registration for that number still
-points its webhook at `ziki-voice-agent`'s Worker, not this one. Cutting
-over requires:
+**Live.** Deployed to `https://dial-a-repo.ziki.workers.dev`. The phone
+number **+1 (607) 365-4321** has been cut over from `ziki-voice-agent` to
+this project:
 
-1. `npx wrangler deploy` this project.
-2. Re-registering the number's webhook with xAI to point at this Worker's
-   `/xai/incoming` URL (rotates `XAI_WEBHOOK_SECRET` -- see below).
-3. Setting the new `XAI_WEBHOOK_SECRET` and `XAI_API_KEY` as Worker
-   secrets here.
+1. Deployed via `npx wrangler deploy`.
+2. xAI's `byo_trunk` registration for that number was deleted and
+   re-created (there's no in-place PATCH for a phone number's webhook --
+   see "Reusing the existing phone number" below) pointing at this
+   Worker's `/xai/incoming` URL. That rotated `dispatchSigningSecret`.
+3. The new `XAI_WEBHOOK_SECRET` and `XAI_API_KEY` were set as Worker
+   secrets here via `wrangler secret put`.
 
-Do this deliberately, not by accident -- it takes the number away from
-`ziki-voice-agent` (that project will need a new number afterward; not
-yet acquired, see its own `AGENTS.md`).
+`ziki-voice-agent` no longer has a working phone number as a result --
+it needs a new one before it can receive calls again (see its own
+`AGENTS.md`).
 
 ## Current architecture
 
@@ -118,14 +117,27 @@ providers, etc.). Reusing it here means:
   resource `09f4ed07-2a00-4cd9-84fd-ad6340043177`) doesn't change --
   it just forwards to xAI's fixed SIP endpoint regardless of which
   Worker eventually receives xAI's webhook.
-- The only real config to move is xAI's `byo_trunk` phone-number
-  registration's `webhook.url`. Re-registering it
-  (`PATCH`/`POST /v2/phone-numbers`, per xAI's docs) rotates
-  `dispatchSigningSecret` -- update this Worker's `XAI_WEBHOOK_SECRET`
-  secret to match, every time.
-- `ziki-voice-agent` will need its own new number afterward if that
-  project's family-hotline use case is still wanted live. Not yet
-  sourced -- see that project's own `AGENTS.md`.
+- **There is no in-place update for a phone number's webhook URL.**
+  `PATCH /v2/phone-numbers/{id}` rejects an unknown `webhook` field (it
+  only accepts `phone_number`/`team_id`/`field_mask`), and re-`POST`ing
+  the same `phone_number` 409s with "already connected through Direct
+  SIP." The only way found to change it: `DELETE
+  /v2/phone-numbers/{id}`, then `POST /v2/phone-numbers` again with the
+  same `phone_number` and the new `webhook.url`. This is exactly what
+  was done to move +1 (607) 365-4321 from `ziki-voice-agent` to this
+  project on 2026-08-08.
+- That delete+recreate cycle issues a **brand new**
+  `dispatchSigningSecret` in the creation response's `webhook` object --
+  it is only ever returned once, at creation, never retrievable via a
+  later `GET`. Capture it immediately and set it as `XAI_WEBHOOK_SECRET`
+  before doing anything else, or you'll have to delete+recreate again
+  just to see it. (Learned the hard way: a `curl | python3 -m json.tool`
+  pipeline choked on a stray `-w` flag's output getting concatenated
+  onto the JSON, the secret scrolled past, and the phone number had to
+  be deleted and recreated a second time just to capture it properly.)
+- `ziki-voice-agent` will need its own new number now that this number
+  is gone from it. Not yet sourced -- see that project's own
+  `AGENTS.md`.
 
 ## Two real Worker bugs (carried over from ziki-voice-agent, still apply)
 
@@ -189,7 +201,6 @@ secrets or hit the real xAI/GitHub/gitingest APIs (tests that exercise
 
 ## Next steps / ideas
 
-- Actually cut over the phone number (see "Status" above).
 - Consider a short-timeout/size-limit audit on the `load_repo` fetches --
   right now a slow or hanging `gitingest.com` response just makes the
   tool call slow; there's no explicit timeout.
