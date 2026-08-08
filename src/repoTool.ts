@@ -90,13 +90,8 @@ export async function loadRepoContext(input: string): Promise<RepoContext> {
   // Bare project name (no "/") -- resolve via search first, which
   // already returns full metadata, then fetch the digest for it.
   const found = await searchRepoByName(input);
-  if (!found) {
-    return {
-      repo: input,
-      info: null,
-      digest: null,
-      error: `Could not find a public GitHub repo matching "${input}". Ask the caller for "owner/repo" or a github.com URL instead.`,
-    };
+  if (!found.ok) {
+    return { repo: input, info: null, digest: null, error: describeSearchMiss(input, found.miss) };
   }
   const digest = await fetchDigest(found.owner, found.repo);
   return { repo: `${found.owner}/${found.repo}`, info: found.info, digest };
@@ -158,29 +153,67 @@ async function fetchRepoInfo(owner: string, repo: string): Promise<RepoInfo | nu
  * well-known projects ("react" -> react/react, "vite" -> vitejs/vite),
  * not guaranteed for generic or ambiguous names.
  */
-async function searchRepoByName(name: string): Promise<{ owner: string; repo: string; info: RepoInfo } | null> {
+// Below this star count, a search "match" isn't trustworthy enough to
+// describe as if it were the repo the caller meant -- see
+// SearchMiss.reason "low_confidence" below. Chosen from a real failure:
+// a caller asking about "the Py coding agent" (a description, not a
+// real project name) matched a 22-star repo on token overlap alone,
+// which got described with the same confidence as an 85k-star exact
+// match for a real request ("pi"). Exact name matches always count as
+// confident regardless of stars -- a small but exactly-named repo is
+// still clearly the thing the caller meant.
+const MIN_STARS_FOR_FUZZY_MATCH = 500;
+
+export interface SearchMiss {
+  reason: "no_results" | "low_confidence";
+  /** Best candidate found, for a "low_confidence" miss -- lets the caller ask "did you mean X?". */
+  closest?: { repo: string; stars: number };
+}
+
+async function searchRepoByName(
+  name: string
+): Promise<{ ok: true; owner: string; repo: string; info: RepoInfo } | { ok: false; miss: SearchMiss }> {
   try {
     const query = encodeURIComponent(`${name} in:name fork:false`);
     const resp = await fetch(
       `https://api.github.com/search/repositories?q=${query}&sort=stars&order=desc&per_page=5`,
       { headers: { "User-Agent": "dial-a-repo", Accept: "application/vnd.github+json" } }
     );
-    if (!resp.ok) return null;
+    if (!resp.ok) return { ok: false, miss: { reason: "no_results" } };
 
     const data = await resp.json<{ items: (GitHubRepoData & { name: string; full_name: string })[] }>();
     const candidates = (data.items ?? []).filter((item) => !item.private);
-    if (candidates.length === 0) return null;
+    if (candidates.length === 0) return { ok: false, miss: { reason: "no_results" } };
 
     const exactMatch = candidates.find((item) => item.name.toLowerCase() === name.trim().toLowerCase());
     const best = exactMatch ?? candidates[0];
 
-    const [owner, repo] = best.full_name.split("/");
-    if (!owner || !repo) return null;
+    if (!exactMatch && best.stargazers_count < MIN_STARS_FOR_FUZZY_MATCH) {
+      return {
+        ok: false,
+        miss: { reason: "low_confidence", closest: { repo: best.full_name, stars: best.stargazers_count } },
+      };
+    }
 
-    return { owner, repo, info: mapRepoData(best) };
+    const [owner, repo] = best.full_name.split("/");
+    if (!owner || !repo) return { ok: false, miss: { reason: "no_results" } };
+
+    return { ok: true, owner, repo, info: mapRepoData(best) };
   } catch {
-    return null;
+    return { ok: false, miss: { reason: "no_results" } };
   }
+}
+
+function describeSearchMiss(name: string, miss: SearchMiss): string {
+  if (miss.reason === "low_confidence" && miss.closest) {
+    return (
+      `Could not confidently match "${name}" to a well-known public GitHub repo -- the closest ` +
+      `name match was "${miss.closest.repo}" (${miss.closest.stars} stars), which isn't popular ` +
+      `enough to be a confident guess. Ask the caller for the exact "owner/repo" instead, or whether ` +
+      `they meant "${miss.closest.repo}".`
+    );
+  }
+  return `Could not find a public GitHub repo matching "${name}". Ask the caller for "owner/repo" or a github.com URL instead.`;
 }
 
 /**
@@ -218,11 +251,8 @@ export async function resolveCloneTarget(
   }
 
   const found = await searchRepoByName(input);
-  if (!found) {
-    return {
-      ok: false,
-      error: `Could not find a public GitHub repo matching "${input}". Ask the caller for "owner/repo" or a github.com URL instead.`,
-    };
+  if (!found.ok) {
+    return { ok: false, error: describeSearchMiss(input, found.miss) };
   }
   return {
     ok: true,

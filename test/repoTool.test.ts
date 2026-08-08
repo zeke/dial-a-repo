@@ -321,4 +321,87 @@ describe("resolveCloneTarget", () => {
     const result = await resolveCloneTarget("nobody/nothing");
     expect(result.ok).toBe(false);
   });
+
+  it("refuses a low-star, non-exact search match instead of describing it confidently", async () => {
+    // Regression test for a real failure: a caller described a project
+    // ("the Py coding agent") rather than naming it exactly. The search
+    // matched a 22-star repo on loose token overlap, which the agent then
+    // described as if it were correct. A non-exact match below the star
+    // threshold should be treated as "no confident match" instead.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              items: [
+                {
+                  name: "Python-coding-Agent",
+                  full_name: "someone/Python-coding-Agent",
+                  description: null,
+                  language: "Python",
+                  stargazers_count: 22,
+                  forks_count: 1,
+                  license: null,
+                  topics: [],
+                  homepage: null,
+                  default_branch: "main",
+                  pushed_at: null,
+                  private: false,
+                  size: 100,
+                },
+              ],
+            }),
+            { status: 200 }
+          )
+        )
+      )
+    );
+
+    const context = await loadRepoContext("the Py coding agent");
+    expect(context.info).toBeNull();
+    expect(context.error).toContain("Python-coding-Agent");
+    expect(context.error).toContain("22");
+
+    const cloneResult = await resolveCloneTarget("the Py coding agent");
+    expect(cloneResult.ok).toBe(false);
+  });
+
+  it("still accepts a low-star repo if its name matches exactly", async () => {
+    // A small but exactly-named repo is still clearly what the caller
+    // meant -- the star threshold only applies to non-exact matches.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              items: [
+                {
+                  name: "tinyrepo",
+                  full_name: "someone/tinyrepo",
+                  description: null,
+                  language: null,
+                  stargazers_count: 3,
+                  forks_count: 0,
+                  license: null,
+                  topics: [],
+                  homepage: null,
+                  default_branch: "main",
+                  pushed_at: null,
+                  private: false,
+                  size: 10,
+                },
+              ],
+            }),
+            { status: 200 }
+          )
+        )
+      )
+    );
+
+    const context = await loadRepoContext("tinyrepo");
+    expect(context.repo).toBe("someone/tinyrepo");
+    expect(context.info?.stars).toBe(3);
+  });
 });

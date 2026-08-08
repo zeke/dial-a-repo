@@ -334,6 +334,96 @@ secrets or hit the real xAI/GitHub/gitingest APIs (tests that exercise
   anywhere they're referenced (CI writes a placeholder `.env` first
   specifically for this reason).
 
+## A real bug found on a live call: search had no confidence threshold
+
+A real call (`call_id: 7d57c97e-9814-452b-a48d-e49f52861488`, 91 seconds,
+2026-08-08) surfaced a genuine gap in the bare-name search feature.
+Reconstructed from Workers Observability logs (see "Reading past call
+logs" below for how) since this project doesn't persist transcripts:
+
+1. Caller: "Can you tell me about the Py coding agent? I don't know the
+   owner but it's something like..." -- a *description*, not an actual
+   project name.
+2. `searchRepoByName("the Py coding agent")` (or however the model
+   phrased the tool call) matched on loose token overlap to some low-star
+   repo, which got described with the same confidence as an exact,
+   85k-star match.
+3. Caller corrected: "No, that's not it, that's not it, it's a different
+   repo, it's called Urandel slash Py" (garbled transcription).
+4. Caller then deliberately tested the shipped feature: "Can you search
+   for public repos named Pi, P I? That are extremely popular and
+   relatively new." This one resolved correctly to `earendil-works/pi`
+   (85.6k stars -- worth noting, the actual coding agent this session
+   runs in) but the "and relatively new" qualifier was silently ignored;
+   `searchRepoByName` only sorts by stars, no recency signal at all.
+
+Root cause: `searchRepoByName` had no confidence threshold. Any non-empty
+search result got treated as *the* answer, whether it was an exact
+85k-star match or a 22-star repo that merely shared a couple of tokens
+with a rambling description. Verified live:
+`GET /search/repositories?q=Py+coding+agent+in:name+fork:false` matches
+`LikithMeruvu/Python-coding-Agent` at 22 stars as the top hit -- exactly
+the kind of match that shouldn't be described as confidently as `pi` ->
+`earendil-works/pi` (85,588 stars).
+
+Fixed in `searchRepoByName`/`describeSearchMiss` (`src/repoTool.ts`):
+non-exact matches below `MIN_STARS_FOR_FUZZY_MATCH` (500) are now treated
+as "no confident match" rather than a real answer -- the caller gets "I
+couldn't find a clear match, did you mean X?" instead of a wrong repo
+described as if it were right. Exact name matches are exempt from the
+threshold regardless of stars (a small, exactly-named repo is still
+clearly what the caller meant). Also tightened `BASE_INSTRUCTIONS` to
+tell the model to extract a clean name/phrase from the caller's sentence
+rather than passing the whole rambling sentence (filler like "I don't
+know the owner but") into search, and added `args` to the `tool_call`
+log line -- debugging this took far longer than it should have because
+the log only ever recorded the tool *name*, never what was actually
+passed to it.
+
+**Not fixed, flagged as a real known gap:** "popular and relatively new"
+(or any recency-aware query) isn't supported -- `searchRepoByName` sorts
+purely by stars. Adding a `pushed:>` / `created:>` qualifier when the
+caller's phrasing implies recency is a reasonable follow-up, deliberately
+not done here to avoid guessing at a good heuristic without more real
+examples of how people actually phrase this.
+
+### Reading past call logs (no transcript persistence in this project)
+
+This project intentionally persists nothing (see "Extra credit" in the
+README), so reconstructing what happened on a real call means reading
+Cloudflare's Workers Observability logs after the fact. What worked:
+
+- **Dashboard UI, not the API.** The GraphQL Analytics API's
+  `workersInvocationsAdaptive` dataset doesn't expose log message
+  bodies, and the REST `workers/observability/telemetry/query` endpoint
+  rejected `wrangler`'s OAuth token (403) -- would need a purpose-scoped
+  API token instead. Fastest path was the dashboard's Observability >
+  Events tab, driven via CDP (see `faster-chrome-devtools-skill`).
+- **The events table is virtualized and its rows toggle-expand.**
+  Clicking a row appends a detail panel (`div.text-xs.font-mono`
+  containing the full JSON log body) rather than replacing one -- click
+  again to collapse it. Batches of ~5 rows per CDP `evaluate` call were
+  reliable; larger batches or long-running loops intermittently hit an
+  internal `Runtime.evaluate` timeout that the CLI's own `--timeout` flag
+  doesn't override, for reasons not fully tracked down. Small batches,
+  retried individually on failure, got there.
+- **The query language is the real unlock.** The default `filter by
+  timeframe` view only renders a virtualized window, not the full result
+  set -- scrolling to its apparent bottom looked like "that's everything"
+  when it wasn't. Searching `call_id = "<id>" AND exists(transcript)` (or
+  `AND type = "..."` / `AND msg = "tool_call"`) cut straight to the
+  meaningful rows -- caller/assistant transcripts and tool calls -- out
+  of dozens of `input_audio_buffer.append` rows per second that aren't
+  worth reading. `msg = "incoming_call"` across a wide timeframe is the
+  fastest way to find a specific past call's `call_id` in the first
+  place.
+- **Log bodies render with `\xa0` (non-breaking space) after JSON colons
+  and a trailing comma before closing braces** (cosmetic formatting from
+  the dashboard's own pretty-printer) -- both break a strict `JSON.parse`
+  on scraped text. Regex-extracting specific fields (after replacing
+  `\xa0` with a plain space) was more robust than trying to parse the
+  whole body.
+
 ## A real bug found on a live call: digest truncation ate all file content
 
 A caller reported the agent could describe a repo's structure but
@@ -368,6 +458,13 @@ exceed the *whole* budget on its own -- if so, budget pieces separately.
 - If cloudflare/computer#89 (short-oid revParse) gets fixed upstream,
   reconsider whether `recentCommits` should go back to short oids for
   nicer spoken/logged output.
+- Recency-aware search ("popular and *new*") isn't supported -- see "A
+  real bug found on a live call: search had no confidence threshold"
+  above. Needs more real examples of how people phrase this before
+  picking a heuristic worth committing to.
+- `MIN_STARS_FOR_FUZZY_MATCH` (500) is a first guess, not tuned against
+  real traffic -- revisit if it's rejecting things it shouldn't, or
+  accepting things it shouldn't.
 - `RepoWorkspace`'s freshness policy (`REFRESH_AFTER_MS`, 15 min) and
   size guard (`MAX_REPO_SIZE_KB`, ~200 MB) are untested guesses about
   what's reasonable for a live phone call -- revisit if either turns out

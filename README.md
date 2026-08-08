@@ -129,10 +129,23 @@ You don't need to know a project's exact GitHub namespace -- "react,"
 most popular matching public repo via GitHub's search API
 (`GET /search/repositories?q={name}+in:name+fork:false&sort=stars`),
 preferring an exact name match among the top results and falling back
-to the single top hit by stars otherwise. This works well for
-well-known projects; it's a best guess, not guaranteed, for generic or
-ambiguous names (e.g. "docker" doesn't resolve to a single obvious
-repo -- there isn't one). See `searchRepoByName` in `src/repoTool.ts`.
+to the single top hit by stars otherwise.
+
+A non-exact match has to clear a minimum star count (`MIN_STARS_FOR_FUZZY_MATCH`
+in `src/repoTool.ts`) to be treated as a real answer -- describing a project
+you're not familiar with by name ("tell me about the Py coding agent")
+is much less likely to resolve than an exact one ("react"), and a weak
+token-overlap match on a rambling description shouldn't be described with
+the same confidence as an exact match. Below that threshold, the tool
+returns an error naming the closest match it found instead of describing
+it as if it were correct. This is a best-effort match, not guaranteed, for
+generic or ambiguous names (e.g. "docker" doesn't resolve to a single
+obvious repo -- there isn't one). See `searchRepoByName` in
+`src/repoTool.ts`, and "A real bug found on a live call: search had no
+confidence threshold" in `AGENTS.md` for the failure that motivated this.
+
+Recency isn't factored in at all yet -- "popular and *new*" isn't
+supported, only star-sorted popularity.
 
 ## The `load_repo` tool
 
