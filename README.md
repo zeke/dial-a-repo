@@ -34,11 +34,14 @@ caller dials +1 (607) 365-4321
   -> Worker verifies the webhook and hands the call to a Durable Object
      keyed by the call's own id
   -> the Durable Object opens a WebSocket to xAI's realtime API,
-     configures the session (voice, instructions, a load_repo tool),
+     configures the session (voice, instructions, four repo tools),
      and relays events for the life of the call
   -> when the caller mentions a repo, the model calls load_repo, which
      fetches GitHub's API + a gitingest.com digest in parallel and
      hands real repo content back to the model to talk from
+  -> for deeper questions ("what changed last month," "show me this
+     file," "diff that commit"), the model calls one of three tools
+     backed by a real git clone -- see "Real git, no container" below
 ```
 
 A [Durable Object](https://developers.cloudflare.com/durable-objects/) holds
@@ -74,6 +77,11 @@ commands, provider setup, and every gotcha found along the way.
   [gitingest](https://github.com/coderamp-labs/gitingest) -- how the
   `load_repo` tool gets real data about a repo. See "The load_repo tool"
   below.
+- [`@cloudflare/computer`](https://github.com/cloudflare/computer) -- a
+  persistent, SQLite-backed virtual filesystem for Durable Objects, used
+  here for its git client (`isomorphic-git`, pure JS, no shell or
+  container needed) so the model can clone a repo and answer questions
+  a flat digest can't. See "Real git, no container" below.
 
 ## Anatomy of a call
 
@@ -102,13 +110,16 @@ commands, provider setup, and every gotcha found along the way.
    voice-activity detection, transcription, and turn-taking automatically.
    The Durable Object listens for events (transcripts, tool calls, errors)
    as they arrive.
-8. When the caller mentions a repo, the model calls `load_repo` (see
-   below). The Durable Object runs it, sends the result back as a
+8. When the caller mentions a repo, the model calls `load_repo`, or one
+   of the three git-backed tools (see "Real git, no container" below).
+   The Durable Object runs it, sends the result back as a
    `function_call_output`, and triggers a `response.create` so the model
    speaks about what it found.
-9. When either side hangs up, the WebSocket closes and the Durable Object
-   is done -- nothing is persisted (see "Extra credit" below for what
-   that would take).
+9. When either side hangs up, the WebSocket closes and the `CallSession`
+   Durable Object is done -- it doesn't persist conversation history
+   (see "Extra credit" below for what that would take). A cloned repo's
+   *own* Durable Object, on the other hand, sticks around and gets reused
+   by the next call about that repo -- see below.
 
 ## The `load_repo` tool
 
@@ -140,6 +151,48 @@ external dependency, at the cost of running a whole extra service --
 deliberately left out to keep this demo focused. If that endpoint ever
 disappears or starts rate-limiting hard, that's the tool to swap out.
 
+## Real git, no container
+
+`load_repo`'s digest is a flat, truncated snapshot -- great for "what is
+this and how does it work," not enough for "what changed last month" or
+"show me this whole file." Three more tools answer those by working
+against a **real git clone**, not another flat API call:
+
+- **`repo_recent_commits(repo, limit?, sinceDays?)`** -- commit history,
+  either a fixed count or a time window ("what's changed in the last
+  month").
+- **`repo_file(repo, path, ref?)`** -- one file's full content, at HEAD
+  or a specific commit/branch/tag, not truncated the way `load_repo`'s
+  digest might be.
+- **`repo_diff(repo, from, to?, path?)`** -- a unified diff between two
+  refs, e.g. `from="HEAD~1"` for "what changed in the last commit."
+
+All three are backed by a `RepoWorkspace` Durable Object
+(`src/repoWorkspace.ts`) using
+[`@cloudflare/computer`](https://github.com/cloudflare/computer)'s git
+client -- which is [`isomorphic-git`](https://github.com/isomorphic-git/isomorphic-git),
+a pure-JS git implementation, "operating directly on the local SQLite
+VFS -- no backend or shell required" per its docs. That's the key thing
+that makes this possible without a container: no `git` binary, no Worker
+Loader, no `experimental` compatibility flag, just `nodejs_compat` and a
+Durable Object.
+
+`RepoWorkspace` is keyed by repo slug (`owner/repo`), not by call --
+once anyone asks about a repo, it's cloned (shallow, capped at ~200 MB)
+and cached there for every future call about that repo, refreshed with a
+fast-forward pull if the last sync is more than 15 minutes old. Cloning
+a repo nobody's asked about yet takes a few seconds; every call after
+that is fast.
+
+**This is a deliberate stress test of a preview package.**
+`@cloudflare/computer`'s own README says plainly: "PREVIEW ONLY... NOT
+suitable for production use at this time." Using it here anyway, on a
+publicly callable phone number, is intentional -- issues found get filed
+upstream (see [cloudflare/computer#89](https://github.com/cloudflare/computer/issues/89)
+for one found and worked around while building this: `git.revParse`
+doesn't resolve abbreviated commit oids despite its own docs describing
+that as supported).
+
 ## Why SignalWire
 
 xAI's own provisioned phone numbers don't currently support webhook-based
@@ -150,26 +203,26 @@ SignalWire at all for inbound calls, only xAI's webhook.
 
 ## Extra credit
 
-This project is deliberately narrow: one tool, no memory, no per-caller
-identity. A sibling project,
+This project is deliberately narrow: a handful of read-only repo tools,
+no conversation memory, no per-caller identity. A sibling project,
 [ziki-voice-agent](https://github.com/zeke/ziki-voice-agent), is the
 private, personal voice-agent project this one was extracted from, and
 still has these features working if you want to see how they're built:
 
-- **Cross-call memory** -- keying the Durable Object by the caller's
-  phone number (not `call_id`) so the same instance, and its SQLite
-  storage, persists a rolling summary of past conversations across calls.
+- **Cross-call memory** -- keying the `CallSession` Durable Object by the
+  caller's phone number (not `call_id`) so the same instance, and its
+  SQLite storage, persists a rolling summary of past conversations across
+  calls.
 - **Per-caller personas** -- a hardcoded phone-number-to-persona lookup
   table, so known callers get a personalized greeting.
 - **Outbound calling** -- placing a call *from* the agent's number to a
   known number via SignalWire's Compatibility API, then bridging the
   answered call into the same SIP destination inbound calls use, so it
   looks like a normal inbound call to xAI once answered.
-- **A general-purpose shell/exec tool** -- giving the model a real,
-  persistent workspace (via
-  [`@cloudflare/computer`](https://github.com/cloudflare/computer)) to
-  run shell commands and git operations in, instead of a single
-  narrow, read-only tool.
+- **A general-purpose shell/exec tool** -- giving the model an actual
+  shell (via `@cloudflare/computer`'s worker-shell backend) to run
+  arbitrary commands in a persistent workspace, not just the narrow,
+  read-only git operations this project exposes.
 
 Any of these would be reasonable things to add here too -- they're just
 not what this demo is about.

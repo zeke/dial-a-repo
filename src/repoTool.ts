@@ -37,6 +37,14 @@ export interface RepoInfo {
   homepage: string | null;
   defaultBranch: string;
   pushedAt: string | null;
+  sizeKb: number;
+}
+
+export interface CloneTarget {
+  repo: string;
+  cloneUrl: string;
+  defaultBranch: string;
+  sizeKb: number;
 }
 
 export interface RepoContext {
@@ -104,6 +112,7 @@ async function fetchRepoInfo(owner: string, repo: string): Promise<RepoInfo | nu
       default_branch: string;
       pushed_at: string | null;
       private: boolean;
+      size: number;
     }>();
 
     if (data.private) return null;
@@ -118,10 +127,46 @@ async function fetchRepoInfo(owner: string, repo: string): Promise<RepoInfo | nu
       homepage: data.homepage || null,
       defaultBranch: data.default_branch ?? "main",
       pushedAt: data.pushed_at ?? null,
+      sizeKb: data.size ?? 0,
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * Resolves "owner/repo" or a GitHub URL down to what RepoWorkspace needs
+ * to clone it: the clone URL, default branch, and size (to guard against
+ * cloning something huge live on a call -- see MAX_REPO_SIZE_KB in
+ * repoWorkspace.ts). Used by the git-backed tools (repo_recent_commits,
+ * repo_file, repo_diff), which each need a real clone rather than
+ * load_repo's flat digest.
+ */
+export async function resolveCloneTarget(
+  input: string
+): Promise<{ ok: true; target: CloneTarget } | { ok: false; error: string }> {
+  const parsed = parseRepoSpec(input);
+  if (!parsed) {
+    return { ok: false, error: `Could not find a GitHub owner/repo in "${input}".` };
+  }
+
+  const info = await fetchRepoInfo(parsed.owner, parsed.repo);
+  if (!info) {
+    return {
+      ok: false,
+      error: `Could not find a public GitHub repo at "${parsed.owner}/${parsed.repo}". It may not exist, may be private, or the name may be misspelled.`,
+    };
+  }
+
+  return {
+    ok: true,
+    target: {
+      repo: `${parsed.owner}/${parsed.repo}`,
+      cloneUrl: `https://github.com/${parsed.owner}/${parsed.repo}.git`,
+      defaultBranch: info.defaultBranch,
+      sizeKb: info.sizeKb,
+    },
+  };
 }
 
 function truncate(text: string, max: number): string {

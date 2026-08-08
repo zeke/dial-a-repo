@@ -1,6 +1,7 @@
 import { readWebhookHeaders, verifyWebhookSignature } from "./webhook";
 
 export { CallSession } from "./callSession";
+export { RepoWorkspace } from "./repoWorkspace";
 
 interface SipHeader {
   name: string;

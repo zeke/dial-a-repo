@@ -101,3 +101,70 @@ describe("CallSession.handleFunctionCall (load_repo)", () => {
     expect(output.error).toContain("not_a_real_tool");
   });
 });
+
+// Exercises the full dispatch path for the git-backed tools: resolving
+// the repo, cloning it via the real REPO_WORKSPACE Durable Object, and
+// returning real results -- against a small, effectively frozen public
+// repo (see repoWorkspace.test.ts for why this one hits real network
+// instead of stubbing it).
+describe("CallSession.handleFunctionCall (git-backed tools)", () => {
+  it("runs repo_recent_commits against a real clone", async () => {
+    // isomorphic-git's clone also goes through global fetch, not a
+    // separate transport -- so this stub has to pass through to the real
+    // fetch for anything that isn't the GitHub metadata lookup, or the
+    // clone itself would 404 against our own stub.
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.startsWith("https://api.github.com/")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                description: null,
+                language: null,
+                stargazers_count: 0,
+                forks_count: 0,
+                license: null,
+                topics: [],
+                homepage: null,
+                default_branch: "master",
+                pushed_at: null,
+                private: false,
+                size: 1,
+              }),
+              { status: 200 }
+            )
+          );
+        }
+        return realFetch(input, init);
+      })
+    );
+
+    const stub = env.CALL_SESSION.getByName("call_test_git_tools");
+    const sent: string[] = [];
+    const fakeWs = { send: (msg: string) => sent.push(msg) } as unknown as WebSocket;
+
+    await runInDurableObject(stub, (instance: CallSession) => {
+      const withPrivate = instance as unknown as {
+        handleFunctionCall(ws: WebSocket, callId: string, evt: FakeFunctionCallEvent): void;
+      };
+      withPrivate.handleFunctionCall(fakeWs, "call_test_git_tools", {
+        type: "response.function_call_arguments.done",
+        name: "repo_recent_commits",
+        call_id: "fc_3",
+        arguments: JSON.stringify({ repo: "octocat/Hello-World", limit: 3 }),
+      });
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+
+    expect(sent).toHaveLength(2);
+    const [outputMsg] = sent.map((m) => JSON.parse(m) as Record<string, unknown>);
+    const item = outputMsg.item as { output: string };
+    const output = JSON.parse(item.output) as { commits?: { oid: string; message: string }[]; error?: string };
+    expect(output.commits?.length).toBeGreaterThan(0);
+    expect(output.commits?.[0].oid).toMatch(/^[0-9a-f]{40}$/);
+  }, 30_000);
+});

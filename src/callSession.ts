@@ -1,7 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
-import { loadRepoContext } from "./repoTool";
+import { loadRepoContext, resolveCloneTarget } from "./repoTool";
 
 const DEFAULT_REPO = "cloudflare/computer";
+const OWN_REPO = "zeke/dial-a-repo";
 
 const GREETING =
   "Hi, this is Dial-a-Repo. Tell me the name of a public GitHub repo -- like \"owner slash repo\", " +
@@ -12,13 +13,32 @@ const BASE_INSTRUCTIONS = `You are "Dial-a-Repo," a voice assistant that helps c
 understand public GitHub repositories over the phone. This is a phone call, not a chat window --
 keep responses short, spoken, and conversational.
 
+Your own source code lives at "${OWN_REPO}". If the caller asks about you, this project, how you
+work, or what your own code looks like, that's the repo to load -- don't describe yourself from
+memory, look yourself up like any other repo.
+
 When a caller mentions a GitHub repository -- a URL, "owner/repo", or a project name you can guess
 the repo slug for -- call the load_repo tool to fetch real, current data about it: its description,
 language, and a digest of its actual file structure and contents. Base what you say on that data.
 Your training data about any specific repo may be stale or wrong, so don't describe a repo's
 internals from memory alone once you have real tool data to work from.
 
-Say something short like "Let me pull that up" before or while calling the tool, so the caller
+You also have three tools backed by a real git clone of the repo, for going deeper than
+load_repo's digest:
+
+- repo_recent_commits -- recent commit history. Use it for "what changed recently," "what's new,"
+  or "what happened in the last commit / week / month."
+- repo_file -- the full content of one specific file (not truncated the way load_repo's digest
+  might be). Use it when the caller asks about a particular file and load_repo's digest didn't
+  have enough, or didn't include it at all.
+- repo_diff -- a diff between two commits. Use it for "what changed in that commit" or "show me
+  the difference between X and Y."
+
+These three need to clone the repo first, which can take a few seconds longer than load_repo on a
+repo nobody's asked about yet -- say something like "let me check the git history" before calling
+one, so the pause makes sense to the caller.
+
+Say something short like "Let me pull that up" before or while calling any tool, so the caller
 knows you're fetching real data and there may be a brief pause.
 
 If the caller doesn't mention any repo -- they're unsure what to ask, say something vague like
@@ -26,38 +46,89 @@ If the caller doesn't mention any repo -- they're unsure what to ask, say someth
 (a real Cloudflare project) as the default. Don't ask permission first, just say something like
 "I'll tell you about ${DEFAULT_REPO} then" and call load_repo with it.
 
-If the tool returns an error (repo not found, private, or misspelled), say so plainly and ask the
-caller to repeat or clarify the name -- don't invent details instead.
+If a tool returns an error (repo not found, private, misspelled, or too large to clone), say so
+plainly and ask the caller to repeat or clarify -- don't invent details instead.
 
 Talk like a knowledgeable, friendly engineer explaining a codebase to a colleague: what the project
 is for, what language and stack it uses, how it's structured, and how it works at a high level.
-Don't read the file tree or file contents verbatim -- summarize them in your own words.
+Don't read the file tree, file contents, or diffs verbatim -- summarize them in your own words.
 
 Be concise. No filler, no padding, no over-explaining. Casual and informal language is fine. Do not
 be cute, overly friendly, or sound like a customer service agent.
 
-If you don't know something and the tool didn't provide it, say so plainly instead of guessing.`;
+If you don't know something and no tool provided it, say so plainly instead of guessing.`;
 
-const LOAD_REPO_TOOL = {
-  type: "function" as const,
-  name: "load_repo",
+const REPO_ARG = {
+  type: "string" as const,
   description:
-    "Fetch real data about a public GitHub repository: description, language, stars, and a " +
-    "digest of its file structure and contents. Call this whenever the caller mentions a repo, " +
-    "before describing what it is or how it works.",
-  parameters: {
-    type: "object",
-    properties: {
-      repo: {
-        type: "string",
-        description:
-          "The repo the caller mentioned, as \"owner/repo\" or a github.com URL, e.g. " +
-          "\"cloudflare/workers-sdk\" or \"https://github.com/cloudflare/workers-sdk\".",
-      },
-    },
-    required: ["repo"],
-  },
+    "The repo, as \"owner/repo\" or a github.com URL, e.g. \"cloudflare/workers-sdk\" or " +
+    "\"https://github.com/cloudflare/workers-sdk\".",
 };
+
+const TOOLS = [
+  {
+    type: "function" as const,
+    name: "load_repo",
+    description:
+      "Fetch real data about a public GitHub repository: description, language, stars, and a " +
+      "digest of its file structure and contents. Call this whenever the caller mentions a repo, " +
+      "before describing what it is or how it works.",
+    parameters: {
+      type: "object",
+      properties: { repo: REPO_ARG },
+      required: ["repo"],
+    },
+  },
+  {
+    type: "function" as const,
+    name: "repo_recent_commits",
+    description:
+      "Recent commit history from a real clone of the repo. Use `sinceDays` for a time window " +
+      "(\"what changed in the last month\"), or `limit` for a fixed count (\"the last 3 commits\").",
+    parameters: {
+      type: "object",
+      properties: {
+        repo: REPO_ARG,
+        limit: { type: "number", description: "Max commits to return when not using sinceDays. Default 10." },
+        sinceDays: { type: "number", description: "Only commits from this many days ago to now." },
+      },
+      required: ["repo"],
+    },
+  },
+  {
+    type: "function" as const,
+    name: "repo_file",
+    description:
+      "Full content of one specific file from a real clone of the repo, at HEAD or a given ref. " +
+      "Use this when load_repo's digest didn't include enough of a file the caller asked about.",
+    parameters: {
+      type: "object",
+      properties: {
+        repo: REPO_ARG,
+        path: { type: "string", description: "Repo-relative file path, e.g. \"src/index.ts\"." },
+        ref: { type: "string", description: "Commit, branch, or tag to read the file at. Defaults to HEAD." },
+      },
+      required: ["repo", "path"],
+    },
+  },
+  {
+    type: "function" as const,
+    name: "repo_diff",
+    description:
+      "Unified diff between two refs in a real clone of the repo. For \"what changed in the last " +
+      "commit,\" use from=\"HEAD~1\" and leave to unset (defaults to HEAD).",
+    parameters: {
+      type: "object",
+      properties: {
+        repo: REPO_ARG,
+        from: { type: "string", description: "Starting ref, e.g. \"HEAD~1\" or a commit oid." },
+        to: { type: "string", description: "Ending ref. Defaults to HEAD." },
+        path: { type: "string", description: "Limit the diff to one file, if given." },
+      },
+      required: ["repo", "from"],
+    },
+  },
+];
 
 /**
  * Loose shape covering only the realtime event fields we actually read.
@@ -73,6 +144,11 @@ interface RealtimeEvent {
   [key: string]: unknown;
 }
 
+/** Reads a string field out of parsed tool-call arguments, or "" if absent/wrong-typed. */
+function str(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
 /**
  * Holds the outbound WebSocket bridge to xAI's Realtime API for a single
  * phone call. Runs inside a Durable Object rather than a plain Worker
@@ -80,8 +156,11 @@ interface RealtimeEvent {
  * execution budget (calls were getting cut off around 30s) -- a Durable
  * Object instance stays alive independently as long as it has active
  * work. One instance per call_id -- this project doesn't persist
- * anything across calls, see the "Extra credit" section of the README
- * for that and other features intentionally left out of this demo.
+ * conversation history across calls, see the "Extra credit" section of
+ * the README for that and other features intentionally left out of this
+ * demo. Real git clones (see repoWorkspace.ts), on the other hand, are
+ * cached per-repo in a separate Durable Object and do persist across
+ * calls, since they're expensive to produce and cheap to reuse.
  */
 export class CallSession extends DurableObject<Env> {
   async run(callId: string): Promise<void> {
@@ -112,7 +191,7 @@ export class CallSession extends DurableObject<Env> {
           voice: "eve",
           instructions: BASE_INSTRUCTIONS,
           turn_detection: { type: "server_vad" },
-          tools: [LOAD_REPO_TOOL],
+          tools: TOOLS,
           audio: { input: { transcription: { model: "grok-transcribe" } } },
         },
       })
@@ -175,7 +254,8 @@ export class CallSession extends DurableObject<Env> {
   }
 
   /**
-   * Runs the load_repo tool and feeds the result back to the model.
+   * Dispatches a tool call to the matching handler and feeds the result
+   * back to the model.
    *
    * xAI emits response.function_call_arguments.done with { name, call_id,
    * arguments }; we run it, reply with a function_call_output conversation
@@ -187,18 +267,26 @@ export class CallSession extends DurableObject<Env> {
     void (async () => {
       let output: string;
       try {
-        if (name === "load_repo") {
-          const args = JSON.parse(argsJson ?? "{}") as { repo?: string };
-          const repo = String(args.repo ?? "").trim();
-          if (!repo) throw new Error("missing repo");
-          const context = await loadRepoContext(repo);
-          console.log(JSON.stringify({ msg: "load_repo", call_id: callId, repo, error: context.error }));
-          output = JSON.stringify(context);
-        } else {
-          output = JSON.stringify({ error: `unknown function ${name}` });
+        const args = JSON.parse(argsJson ?? "{}") as Record<string, unknown>;
+        switch (name) {
+          case "load_repo":
+            output = JSON.stringify(await this.runLoadRepo(args));
+            break;
+          case "repo_recent_commits":
+            output = JSON.stringify(await this.runRecentCommits(args));
+            break;
+          case "repo_file":
+            output = JSON.stringify(await this.runRepoFile(args));
+            break;
+          case "repo_diff":
+            output = JSON.stringify(await this.runRepoDiff(args));
+            break;
+          default:
+            output = JSON.stringify({ error: `unknown function ${name}` });
         }
+        console.log(JSON.stringify({ msg: "tool_call", call_id: callId, name }));
       } catch (err) {
-        console.error(JSON.stringify({ msg: "load_repo_error", call_id: callId, error: String(err) }));
+        console.error(JSON.stringify({ msg: "tool_call_error", call_id: callId, name, error: String(err) }));
         output = JSON.stringify({ error: String(err) });
       }
       ws.send(
@@ -209,5 +297,66 @@ export class CallSession extends DurableObject<Env> {
       );
       ws.send(JSON.stringify({ type: "response.create" }));
     })();
+  }
+
+  private async runLoadRepo(args: Record<string, unknown>) {
+    const repo = str(args.repo);
+    if (!repo) return { error: "missing repo" };
+    return loadRepoContext(repo);
+  }
+
+  /**
+   * Shared by the three git-backed tools: resolves the repo, ensures its
+   * RepoWorkspace clone is present and fresh, and returns a stub to call
+   * further RPC methods on. Returns an error payload (never throws) if
+   * resolution or cloning fails, so callers can return it directly.
+   */
+  private async getRepoWorkspace(repoInput: string) {
+    const resolved = await resolveCloneTarget(repoInput);
+    if (!resolved.ok) return { ok: false as const, error: resolved.error };
+
+    const stub = this.env.REPO_WORKSPACE.get(this.env.REPO_WORKSPACE.idFromName(resolved.target.repo));
+    const cloneResult = await stub.ensureCloned(
+      resolved.target.cloneUrl,
+      resolved.target.defaultBranch,
+      resolved.target.sizeKb
+    );
+    if (!cloneResult.ok) return { ok: false as const, error: cloneResult.error };
+
+    return { ok: true as const, stub };
+  }
+
+  private async runRecentCommits(args: Record<string, unknown>) {
+    const repo = str(args.repo);
+    if (!repo) return { error: "missing repo" };
+    const workspace = await this.getRepoWorkspace(repo);
+    if (!workspace.ok) return { error: workspace.error };
+
+    const limit = typeof args.limit === "number" ? args.limit : 10;
+    const sinceDays = typeof args.sinceDays === "number" ? args.sinceDays : undefined;
+    return workspace.stub.recentCommits(limit, sinceDays);
+  }
+
+  private async runRepoFile(args: Record<string, unknown>) {
+    const repo = str(args.repo);
+    const path = str(args.path);
+    if (!repo || !path) return { error: "missing repo or path" };
+    const workspace = await this.getRepoWorkspace(repo);
+    if (!workspace.ok) return { error: workspace.error };
+
+    const ref = str(args.ref) || undefined;
+    return workspace.stub.fileAt(path, ref);
+  }
+
+  private async runRepoDiff(args: Record<string, unknown>) {
+    const repo = str(args.repo);
+    const from = str(args.from);
+    if (!repo || !from) return { error: "missing repo or from" };
+    const workspace = await this.getRepoWorkspace(repo);
+    if (!workspace.ok) return { error: workspace.error };
+
+    const to = str(args.to) || undefined;
+    const path = str(args.path) || undefined;
+    return workspace.stub.diffRefs(from, to, path);
   }
 }
