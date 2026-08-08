@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "dial-a-repo",
+  "account_id": "d37edcc2a3a79f5a6df92ad287430b02",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-08",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "CALL_SESSION", "class_name": "CallSession" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CallSession"] }]
+}

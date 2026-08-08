@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Create placeholder .env for type generation
+        # wrangler types infers Env's secret properties (XAI_API_KEY,
+        # XAI_WEBHOOK_SECRET) from the presence of a local .env file --
+        # without one, the generated Env interface is missing them
+        # entirely and typecheck fails. Values are never used: tests get
+        # their own bindings from vitest.config.ts's miniflare.bindings.
+        run: |
+          echo "XAI_API_KEY=placeholder" >> .env
+          echo "XAI_WEBHOOK_SECRET=placeholder" >> .env
+
+      - name: Generate Worker types
+        run: npx wrangler types
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test

@@ -1,0 +1,27 @@
+{
+  "name": "dial-a-repo",
+  "version": "1.0.0",
+  "description": "Call a phone number, mention a public GitHub repo, and have a voice conversation about it. A reference implementation for building voice agents on Cloudflare.",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "tail": "wrangler tail",
+    "test": "vitest run",
+    "lint": "eslint ."
+  },
+  "keywords": ["cloudflare-workers", "voice-agent", "durable-objects", "xai", "github"],
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.18.6",
+    "@types/node": "^26.1.1",
+    "eslint": "^10.7.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.64.0",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.107.1"
+  }
+}
