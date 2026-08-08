@@ -20,9 +20,12 @@ if this project ever needs to grow into them.
 
 ## Status (as of 2026-08-08)
 
-**Live.** Deployed to `https://dial-a-repo.ziki.workers.dev`. The phone
-number **+1 (607) 365-4321** has been cut over from `ziki-voice-agent` to
-this project:
+**Live**, now with real git tooling. Deployed to
+`https://dial-a-repo.ziki.workers.dev`, with a second Durable Object
+class (`RepoWorkspace`, `src/repoWorkspace.ts`) giving the model a real
+git clone to work from -- see "Real git tooling" below. The phone number
+**+1 (607) 365-4321** was cut over from `ziki-voice-agent` to this
+project on the same day:
 
 1. Deployed via `npx wrangler deploy`.
 2. xAI's `byo_trunk` registration for that number was deleted and
@@ -47,9 +50,13 @@ caller dials +1 (607) 365-4321 (SignalWire number)
   -> Worker verifies the Standard Webhooks signature and hands the call
      off to a CallSession Durable Object keyed by call_id
   -> The Durable Object opens wss://api.x.ai/v1/realtime?call_id=..., sends
-     session.update (voice, instructions, the load_repo tool) + a
+     session.update (voice, instructions, four repo tools) + a
      force_message greeting, and stays alive relaying events for the
      life of the call
+  -> the git-backed tools (repo_recent_commits, repo_file, repo_diff)
+     each reach into a *separate* RepoWorkspace Durable Object, keyed by
+     repo slug (not call_id), which owns a real cloned git repo and is
+     reused by every future call about that same repo
 ```
 
 Note: SignalWire itself never talks to this Worker. It only forwards SIP
@@ -91,20 +98,99 @@ SignalWire's SIP Gateway resource doesn't need to change at all.
    errors, and the close event that ends the call.
 
 `src/repoTool.ts` -- the `load_repo` tool's implementation (see README's
-"The load_repo tool" section for the why). `parseRepoSpec` is the
-"owner/repo" / URL parser; `loadRepoContext` does the two parallel
-fetches (GitHub REST API + gitingest.com) and truncates the combined
-digest to `MAX_DIGEST_CHARS`.
+"The load_repo tool" section for the why), plus `resolveCloneTarget`,
+used by the three git-backed tools to turn caller input into a clone
+URL + default branch + size (for the size guard in `ensureCloned`).
+`parseRepoSpec` is the shared "owner/repo" / URL parser. `loadRepoContext`
+does the two parallel fetches (GitHub REST API + gitingest.com) and
+truncates the combined digest to `MAX_TREE_CHARS` + `MAX_CONTENT_CHARS`
+(separately -- see "A real bug found on a live call" below for why not
+one combined cap).
 
-## Why not a shell/exec tool
+`src/repoWorkspace.ts` -- the `RepoWorkspace` Durable Object. See "Real
+git tooling" below.
+
+## Why not a general-purpose shell/exec tool
 
 `ziki-voice-agent` has a general-purpose `exec` tool backed by
-[`@cloudflare/computer`](https://github.com/cloudflare/computer), giving
-the model a persistent workspace with shell + git access. That's
-deliberately not here: a public phone number reaching arbitrary shell
-execution is a much bigger safety surface than this demo needs.
-`load_repo` only ever makes GET requests to GitHub's API and gitingest's
-API -- no cloning, no execution, nothing mutable.
+[`@cloudflare/computer`](https://github.com/cloudflare/computer)'s
+worker-shell backend, giving the model a persistent workspace with an
+actual shell. That's deliberately not here: a public phone number
+reaching arbitrary shell execution is a much bigger safety surface than
+this demo needs. This project *does* use `@cloudflare/computer`, just its
+git client only (see below) -- clone, log, diff, show, no shell, no
+command execution of any kind.
+
+## Real git tooling (added 2026-08-08)
+
+`load_repo`'s gitingest digest is a flat, truncated snapshot -- fine for
+"what is this," not enough for "what changed last month" or "show me
+this whole file." Three more tools (`repo_recent_commits`, `repo_file`,
+`repo_diff` in `src/callSession.ts`'s `TOOLS`) answer those against a
+**real git clone**, via a new `RepoWorkspace` Durable Object.
+
+**No container needed.** This took investigation to get right --
+`@cloudflare/computer`'s git client is
+[`isomorphic-git`](https://github.com/isomorphic-git/isomorphic-git) (pure
+JS), "operating directly on the local SQLite VFS -- no backend or shell
+required" per `docs/13_git_interface.md` in that repo. That means `git
+clone`/`log`/`diff`/`show` work in a plain Durable Object with just the
+`nodejs_compat` compatibility flag -- no `worker_loaders`, no
+`experimental` flag, no Worker Loader, no container, none of the
+worker-shell backend's machinery. `RepoWorkspace` only sets `git:
+createGitClient()` in its `withWorkspace` options -- no `backends` array
+at all.
+
+**Real dependency, not just a peer dep footnote.** `@cloudflare/computer`'s
+README calls `@platformatic/vfs` an "optional peer dependency," which
+reads like it might not be needed -- it is. `git.js`'s
+`workspaceIsomorphicGitClient` does `await import("@platformatic/vfs")`
+unconditionally the first time any git operation runs; skip installing
+it and every git call throws. Both are real `dependencies` here, not
+devDependencies.
+
+**Caching, not per-call cloning.** `RepoWorkspace` is keyed by repo slug
+(`owner/repo`), not `call_id` -- `ensureCloned()` clones once (shallow,
+`depth: 200`, guarded by `MAX_REPO_SIZE_KB` so nobody can make it clone
+"torvalds/linux" live on a call) and reuses that same clone for every
+future call about that repo, refreshing with a fast-forward `pull` if
+the last sync is older than `REFRESH_AFTER_MS` (15 min). First call
+about a new repo pays the clone cost; every call after that is fast.
+
+**This is a deliberate stress test of a preview package**, not an
+oversight -- see the README's "Real git, no container" section for why
+that's an acceptable tradeoff here.
+
+### A real upstream bug found while building this
+
+`git.revParse` doesn't resolve abbreviated (short) commit oids, despite
+`docs/13_git_interface.md` explicitly describing "short oid prefix" as
+supported. Repro'd live against `octocat/Hello-World`: a 7-char prefix of
+a real commit oid (taken directly from that same commit's own `git.log`
+output) throws `GitError: git rev-parse failed: Could not find
+<prefix>.`, while the full 40-char oid resolves fine. Filed as
+[cloudflare/computer#89](https://github.com/cloudflare/computer/issues/89).
+
+Worked around on our end in `RepoWorkspace.recentCommits`: it returns
+full 40-char oids, not the usual 7-char short form, specifically so an
+oid the model reuses as `ref`/`from` on `repo_file`/`repo_diff` stays
+resolvable. If that upstream bug gets fixed, the full-oid workaround can
+stay (it's not wrong, just more verbose) or be reverted to short oids for
+nicer tool output -- either is fine.
+
+### How `RepoWorkspace` was actually verified
+
+This project's usual testing convention is "stub `fetch`, no real
+network in tests" (see `repoTool.test.ts`). `test/repoWorkspace.test.ts`
+is a deliberate exception: it clones a real, tiny, effectively frozen
+public repo (`octocat/Hello-World`, GitHub's own long-standing test
+fixture) over real network, because mocking isomorphic-git's smart HTTP
+protocol negotiation and pack parsing convincingly enough to catch real
+bugs (like the one above) isn't worth the effort compared to just using
+a real, tiny, stable target. `test/callSession.test.ts`'s git-tool test
+does the same, with `fetch` stubbed for the GitHub metadata call only
+(the clone itself also goes through global `fetch`, so the stub passes
+through to the real one for anything that isn't the metadata URL).
 
 ## Reusing the existing phone number
 
@@ -199,15 +285,41 @@ secrets or hit the real xAI/GitHub/gitingest APIs (tests that exercise
   anywhere they're referenced (CI writes a placeholder `.env` first
   specifically for this reason).
 
+## A real bug found on a live call: digest truncation ate all file content
+
+A caller reported the agent could describe a repo's structure but
+couldn't say anything about a specific file. Root cause:
+`load_repo`'s digest truncation capped the *combined* `summary + tree +
+content` string at one budget. A large repo's file tree alone can exceed
+that on its own (`cloudflare/computer`'s tree is ~21,600 chars), so the
+digest ended up entirely (truncated) tree, with zero file content ever
+reaching the model. Fixed by capping the tree (`MAX_TREE_CHARS`) and
+content (`MAX_CONTENT_CHARS`) independently in `src/repoTool.ts`, so real
+file content always makes it through regardless of tree size. Verified
+directly against the real `gitingest.com` response for `cloudflare/computer`
+before and after. General lesson: when truncating a concatenation of
+several pieces to fit a budget, check whether any single piece can
+exceed the *whole* budget on its own -- if so, budget pieces separately.
+
 ## Next steps / ideas
 
 - Consider a short-timeout/size-limit audit on the `load_repo` fetches --
   right now a slow or hanging `gitingest.com` response just makes the
-  tool call slow; there's no explicit timeout.
+  tool call slow; there's no explicit timeout. The same applies to
+  `RepoWorkspace`'s clone/pull calls, which can take longer than
+  `load_repo` on a repo nobody's asked about yet.
 - If `gitingest.com`'s API ever becomes unreliable or disappears, that's
   the thing to replace in `src/repoTool.ts` -- consider GitHub's tree API
   (`git/trees?recursive=1`) plus selective file fetches as a fallback
   that only depends on GitHub itself.
 - Consider a rate limit or abuse guard now that this is meant to be
   publicly callable (no `key=`-gated debug/admin routes exist here at
-  all, intentionally -- there's nothing to gate).
+  all, intentionally -- there's nothing to gate). This matters more now
+  that a public caller can trigger a real git clone, not just API GETs.
+- If cloudflare/computer#89 (short-oid revParse) gets fixed upstream,
+  reconsider whether `recentCommits` should go back to short oids for
+  nicer spoken/logged output.
+- `RepoWorkspace`'s freshness policy (`REFRESH_AFTER_MS`, 15 min) and
+  size guard (`MAX_REPO_SIZE_KB`, ~200 MB) are untested guesses about
+  what's reasonable for a live phone call -- revisit if either turns out
+  to be too aggressive or too loose in practice.

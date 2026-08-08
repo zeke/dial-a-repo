@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadRepoContext, parseRepoSpec } from "../src/repoTool";
+import { loadRepoContext, parseRepoSpec, resolveCloneTarget } from "../src/repoTool";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -60,6 +60,7 @@ describe("loadRepoContext", () => {
                 default_branch: "main",
                 pushed_at: "2026-01-01T00:00:00Z",
                 private: false,
+                size: 4096,
               }),
               { status: 200 }
             )
@@ -94,6 +95,7 @@ describe("loadRepoContext", () => {
       homepage: "https://workers.cloudflare.com",
       defaultBranch: "main",
       pushedAt: "2026-01-01T00:00:00Z",
+      sizeKb: 4096,
     });
     expect(context.digest).toContain("workers-sdk");
   });
@@ -154,5 +156,55 @@ describe("loadRepoContext", () => {
     const context = await loadRepoContext("owner/repo");
     expect(context.digest).toContain("FILE: README.md");
     expect(context.digest).toContain("Hello.");
+  });
+});
+
+describe("resolveCloneTarget", () => {
+  it("returns a clone URL, default branch, and size for a real-looking repo", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              description: null,
+              language: "TypeScript",
+              stargazers_count: 1,
+              forks_count: 0,
+              license: null,
+              topics: [],
+              homepage: null,
+              default_branch: "trunk",
+              pushed_at: null,
+              private: false,
+              size: 1234,
+            }),
+            { status: 200 }
+          )
+        )
+      )
+    );
+
+    const result = await resolveCloneTarget("owner/repo");
+    expect(result).toEqual({
+      ok: true,
+      target: {
+        repo: "owner/repo",
+        cloneUrl: "https://github.com/owner/repo.git",
+        defaultBranch: "trunk",
+        sizeKb: 1234,
+      },
+    });
+  });
+
+  it("returns an error for input with no owner/repo", async () => {
+    const result = await resolveCloneTarget("not-a-repo");
+    expect(result.ok).toBe(false);
+  });
+
+  it("returns an error when the repo doesn't exist", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response("not found", { status: 404 }))));
+    const result = await resolveCloneTarget("nobody/nothing");
+    expect(result.ok).toBe(false);
   });
 });
