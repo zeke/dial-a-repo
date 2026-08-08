@@ -2,7 +2,9 @@
 
 Call **+1 (607) 365-4321** (a US phone number) and tell it about a public
 GitHub repo -- a name, an `owner/repo`, or a full URL. It'll dig in and have
-a real, spoken conversation with you about what it is and how it works.
+a real, spoken conversation with you about what it is and how it works. Not
+sure what to ask about? Just stay quiet after the greeting and it'll default
+to talking about [`cloudflare/computer`](https://github.com/cloudflare/computer).
 
 This is an open-source demo and reference implementation for building
 **voice agents on Cloudflare** that can make and receive real phone calls --

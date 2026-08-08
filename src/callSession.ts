@@ -1,9 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
 import { loadRepoContext } from "./repoTool";
 
+const DEFAULT_REPO = "cloudflare/computer";
+
 const GREETING =
   "Hi, this is Dial-a-Repo. Tell me the name of a public GitHub repo -- like \"owner slash repo\", " +
-  "or just a project name -- and I'll dig in and tell you what it's about.";
+  "or just a project name -- and I'll dig in and tell you what it's about. Or stay quiet and " +
+  `I'll tell you about ${DEFAULT_REPO}.`;
 
 const BASE_INSTRUCTIONS = `You are "Dial-a-Repo," a voice assistant that helps callers explore and
 understand public GitHub repositories over the phone. This is a phone call, not a chat window --
@@ -17,6 +20,11 @@ internals from memory alone once you have real tool data to work from.
 
 Say something short like "Let me pull that up" before or while calling the tool, so the caller
 knows you're fetching real data and there may be a brief pause.
+
+If the caller doesn't mention any repo -- they're unsure what to ask, say something vague like
+"I don't know" or "you choose," or just stay silent after the greeting -- use "${DEFAULT_REPO}"
+(a real Cloudflare project) as the default. Don't ask permission first, just say something like
+"I'll tell you about ${DEFAULT_REPO} then" and call load_repo with it.
 
 If the tool returns an error (repo not found, private, or misspelled), say so plainly and ask the
 caller to repeat or clarify the name -- don't invent details instead.
