@@ -188,7 +188,7 @@ export class CallSession extends DurableObject<Env> {
       JSON.stringify({
         type: "session.update",
         session: {
-          voice: "eve",
+          voice: "celeste", // "Compassionate, confident, and reassuring" per xAI's voice table
           instructions: BASE_INSTRUCTIONS,
           turn_detection: { type: "server_vad" },
           tools: TOOLS,
