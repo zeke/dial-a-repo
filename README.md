@@ -136,10 +136,14 @@ two requests in parallel:
    gets "the whole repo, efficiently," instead of the model browsing
    files one at a time.
 
-The combined result is hard-truncated (see `MAX_DIGEST_CHARS` in
-`src/repoTool.ts`) before it's handed back to the model, so a huge
-monorepo can't blow up the context or the call's latency -- a phone
-conversation needs a summary to talk from, not an entire repo's source.
+The tree and content are each hard-truncated independently (see
+`MAX_TREE_CHARS` / `MAX_CONTENT_CHARS` in `src/repoTool.ts`) before
+being handed back to the model, so a huge monorepo can't blow up the
+context or the call's latency -- a phone conversation needs a summary to
+talk from, not an entire repo's source. They're capped separately rather
+than as one combined budget because a large repo's file tree alone can
+exceed a single shared budget on its own, which is exactly what caused a
+real bug on a live call -- see `AGENTS.md` for the story.
 
 **Dependency note:** `gitingest.com`'s `/api/{owner}/{repo}` endpoint
 isn't an officially documented public API -- it's how gitingest's own web
