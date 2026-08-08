@@ -19,13 +19,23 @@ memory, look yourself up like any other repo.
 
 When a caller mentions a GitHub repository -- a URL, "owner/repo", or just a bare project name like
 "react" or "vite" -- call the load_repo tool to fetch real, current data about it: its description,
-language, and a digest of its actual file structure and contents. Pass whatever the caller said
-straight through as the repo argument, bare name and all -- every repo tool resolves a bare name to
-the most popular matching public repo on its own (e.g. "react" -> react/react). Don't try to guess
-or supply the owner yourself; a wrong guess fails where the tool's own resolution would have
-succeeded. Base what you say on the tool's data -- your training data about any specific repo may
-be stale or wrong, so don't describe a repo's internals from memory alone once you have real tool
-data to work from.
+language, and a digest of its actual file structure and contents. For the repo argument, pass the
+project name or short phrase itself, not the caller's whole sentence -- strip filler like "can you
+tell me about," "I don't know the owner but," or "it's called." "the Py coding agent" should become
+"Py coding agent" or similar, not the full sentence around it. Every repo tool resolves a bare name
+to the most popular matching public repo on its own (e.g. "react" -> react/react) -- don't guess or
+supply the owner yourself, a wrong guess fails where the tool's own resolution would have succeeded.
+
+A vague description ("the thing that does X") is much less likely to resolve than an actual project
+name -- if the caller doesn't seem to know the exact name, ask them for it or for the "owner/repo"
+rather than passing your best paraphrase of a whole sentence into the tool. If the tool comes back
+saying it couldn't confidently match the name, say so plainly and ask the caller to repeat or spell
+the name -- don't fall back to describing an obscure, likely-wrong repo just because the tool found
+something.
+
+Base what you say on the tool's data -- your training data about any specific repo may be stale or
+wrong, so don't describe a repo's internals from memory alone once you have real tool data to work
+from.
 
 You also have three tools backed by a real git clone of the repo, for going deeper than
 load_repo's digest:
@@ -65,9 +75,10 @@ If you don't know something and no tool provided it, say so plainly instead of g
 const REPO_ARG = {
   type: "string" as const,
   description:
-    "The repo, exactly as the caller said it -- \"owner/repo\", a github.com URL, or a bare " +
-    "project name with no owner (e.g. \"react\", \"vite\", \"cheerio\"). Bare names are resolved " +
-    "to the most popular matching public repo automatically -- don't prepend a guessed owner.",
+    "\"owner/repo\", a github.com URL, or a bare project name with no owner (e.g. \"react\", " +
+    "\"vite\", \"cheerio\"). Bare names are resolved to the most popular matching public repo " +
+    "automatically -- don't prepend a guessed owner. Pass just the name or short phrase, not the " +
+    "caller's whole sentence -- strip conversational filler first.",
 };
 
 const TOOLS = [
@@ -289,7 +300,10 @@ export class CallSession extends DurableObject<Env> {
           default:
             output = JSON.stringify({ error: `unknown function ${name}` });
         }
-        console.log(JSON.stringify({ msg: "tool_call", call_id: callId, name }));
+        // Log the args, not just the tool name -- debugging a real
+        // issue once meant reconstructing what a caller actually said
+        // from raw transcript events because this only logged `name`.
+        console.log(JSON.stringify({ msg: "tool_call", call_id: callId, name, args }));
       } catch (err) {
         console.error(JSON.stringify({ msg: "tool_call_error", call_id: callId, name, error: String(err) }));
         output = JSON.stringify({ error: String(err) });
