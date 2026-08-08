@@ -17,11 +17,15 @@ Your own source code lives at "${OWN_REPO}". If the caller asks about you, this 
 work, or what your own code looks like, that's the repo to load -- don't describe yourself from
 memory, look yourself up like any other repo.
 
-When a caller mentions a GitHub repository -- a URL, "owner/repo", or a project name you can guess
-the repo slug for -- call the load_repo tool to fetch real, current data about it: its description,
-language, and a digest of its actual file structure and contents. Base what you say on that data.
-Your training data about any specific repo may be stale or wrong, so don't describe a repo's
-internals from memory alone once you have real tool data to work from.
+When a caller mentions a GitHub repository -- a URL, "owner/repo", or just a bare project name like
+"react" or "vite" -- call the load_repo tool to fetch real, current data about it: its description,
+language, and a digest of its actual file structure and contents. Pass whatever the caller said
+straight through as the repo argument, bare name and all -- every repo tool resolves a bare name to
+the most popular matching public repo on its own (e.g. "react" -> react/react). Don't try to guess
+or supply the owner yourself; a wrong guess fails where the tool's own resolution would have
+succeeded. Base what you say on the tool's data -- your training data about any specific repo may
+be stale or wrong, so don't describe a repo's internals from memory alone once you have real tool
+data to work from.
 
 You also have three tools backed by a real git clone of the repo, for going deeper than
 load_repo's digest:
@@ -61,8 +65,9 @@ If you don't know something and no tool provided it, say so plainly instead of g
 const REPO_ARG = {
   type: "string" as const,
   description:
-    "The repo, as \"owner/repo\" or a github.com URL, e.g. \"cloudflare/workers-sdk\" or " +
-    "\"https://github.com/cloudflare/workers-sdk\".",
+    "The repo, exactly as the caller said it -- \"owner/repo\", a github.com URL, or a bare " +
+    "project name with no owner (e.g. \"react\", \"vite\", \"cheerio\"). Bare names are resolved " +
+    "to the most popular matching public repo automatically -- don't prepend a guessed owner.",
 };
 
 const TOOLS = [

@@ -121,12 +121,26 @@ commands, provider setup, and every gotcha found along the way.
    *own* Durable Object, on the other hand, sticks around and gets reused
    by the next call about that repo -- see below.
 
+## Mentioning a repo without knowing its owner
+
+You don't need to know a project's exact GitHub namespace -- "react,"
+"vite," or "cheerio" work fine, not just "facebook/react" or
+"vitejs/vite." Every repo tool resolves a bare name (no `/`) to the
+most popular matching public repo via GitHub's search API
+(`GET /search/repositories?q={name}+in:name+fork:false&sort=stars`),
+preferring an exact name match among the top results and falling back
+to the single top hit by stars otherwise. This works well for
+well-known projects; it's a best guess, not guaranteed, for generic or
+ambiguous names (e.g. "docker" doesn't resolve to a single obvious
+repo -- there isn't one). See `searchRepoByName` in `src/repoTool.ts`.
+
 ## The `load_repo` tool
 
 One tool, kept deliberately simple and read-only: no shell access, no
 cloning, no arbitrary code execution reachable from a public phone
 number. When the model calls `load_repo(repo)`, the Durable Object makes
-two requests in parallel:
+two requests in parallel (or, for a bare name, one search request that
+returns the same metadata a direct lookup would):
 
 1. **GitHub's REST API** (`GET /repos/{owner}/{repo}`) for metadata --
    description, language, stars, forks, license, topics.
