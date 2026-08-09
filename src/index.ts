@@ -19,6 +19,8 @@ interface IncomingCallEvent {
 
 const LANDING_PAGE = `Dial-a-Repo
 
+Pick up your phone and talk to any public GitHub repository.
+
 Call it: +1 (607) 365-4321 (US number)
 
 Tell it about a public GitHub repo and have a conversation about what it
