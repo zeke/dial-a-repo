@@ -1,5 +1,11 @@
 # Dial-a-Repo
 
+<p align="center">
+  <img src="art/octocat-rotary-phone.png" alt="Octocat talking on a red rotary phone" width="300">
+</p>
+
+Pick up your phone and talk to any public GitHub repository.
+
 Call **+1 (607) 365-4321** (a US phone number) and tell it about a public
 GitHub repo -- a name, an `owner/repo`, or a full URL. It'll dig in and have
 a real, spoken conversation with you about what it is and how it works. Not

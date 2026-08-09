@@ -1,7 +1,7 @@
 {
   "name": "dial-a-repo",
   "version": "1.0.0",
-  "description": "Call a phone number, mention a public GitHub repo, and have a voice conversation about it. A reference implementation for building voice agents on Cloudflare.",
+  "description": "Pick up your phone and talk to any public GitHub repository. A reference implementation for building voice agents on Cloudflare.",
   "main": "src/index.ts",
   "scripts": {
     "dev": "wrangler dev",
