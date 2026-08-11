@@ -367,6 +367,169 @@ describe("resolveCloneTarget", () => {
     expect(cloneResult.ok).toBe(false);
   });
 
+  it("uses web search to resolve a description GitHub search gets wrong", async () => {
+    // GitHub search only matches on the repo name, so a vague description
+    // ("the pi coding agent") lands on a low-star, wrong repo. The
+    // github.com-scoped web search finds the real one, which then gets
+    // verified against the GitHub API before we trust it.
+    let webSearchScopedToGitHub = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.startsWith("https://api.github.com/search/repositories")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                items: [
+                  {
+                    name: "pi-coding-agent",
+                    full_name: "someone/pi-coding-agent",
+                    stargazers_count: 12,
+                    forks_count: 0,
+                    private: false,
+                    default_branch: "main",
+                    size: 50,
+                    topics: [],
+                    license: null,
+                  },
+                ],
+              }),
+              { status: 200 }
+            )
+          );
+        }
+        if (url === "https://api.x.ai/v1/responses") {
+          const body = JSON.parse(init?.body as string) as {
+            tools?: { filters?: { allowed_domains?: string[] } }[];
+          };
+          webSearchScopedToGitHub = body.tools?.[0]?.filters?.allowed_domains?.includes("github.com") ?? false;
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ output: [{ content: [{ type: "output_text", text: "earendil-works/pi" }] }] }),
+              { status: 200 }
+            )
+          );
+        }
+        if (url === "https://api.github.com/repos/earendil-works/pi") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                description: "The pi coding agent.",
+                stargazers_count: 85_000,
+                forks_count: 1_000,
+                private: false,
+                default_branch: "main",
+                size: 3000,
+                topics: [],
+                license: null,
+              }),
+              { status: 200 }
+            )
+          );
+        }
+        if (url.startsWith("https://gitingest.com/")) {
+          return Promise.resolve(new Response(JSON.stringify({ summary: "Repository: earendil-works/pi" }), { status: 200 }));
+        }
+        return Promise.resolve(new Response("not found", { status: 404 }));
+      })
+    );
+
+    const context = await loadRepoContext("the pi coding agent", "test-key");
+    expect(context.repo).toBe("earendil-works/pi");
+    expect(context.info?.stars).toBe(85_000);
+    expect(webSearchScopedToGitHub).toBe(true);
+  });
+
+  it("prefers an exact GitHub name match over web search", async () => {
+    // An exact name match is unambiguous and free -- it should win
+    // without ever trusting (or verifying) the web-search result.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url.startsWith("https://api.github.com/search/repositories")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                items: [
+                  {
+                    name: "vite",
+                    full_name: "vitejs/vite",
+                    stargazers_count: 82_000,
+                    forks_count: 8_000,
+                    private: false,
+                    default_branch: "main",
+                    size: 73_000,
+                    topics: [],
+                    license: null,
+                  },
+                ],
+              }),
+              { status: 200 }
+            )
+          );
+        }
+        if (url === "https://api.x.ai/v1/responses") {
+          return Promise.resolve(new Response(JSON.stringify({ output_text: "impostor/vite" }), { status: 200 }));
+        }
+        if (url === "https://api.github.com/repos/impostor/vite") {
+          throw new Error("should not verify the web-search result when an exact match exists");
+        }
+        return Promise.resolve(new Response("not found", { status: 404 }));
+      })
+    );
+
+    const result = await resolveCloneTarget("vite", "test-key");
+    expect(result).toMatchObject({ ok: true, target: { repo: "vitejs/vite" } });
+  });
+
+  it("ignores a web-search result that doesn't exist on GitHub", async () => {
+    // The web search can name a repo that's moved or hallucinated -- if
+    // the GitHub API can't confirm it, fall back to GitHub's own top hit.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url.startsWith("https://api.github.com/search/repositories")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                items: [
+                  {
+                    name: "something-else",
+                    full_name: "real/something-else",
+                    stargazers_count: 5_000,
+                    forks_count: 100,
+                    private: false,
+                    default_branch: "main",
+                    size: 200,
+                    topics: [],
+                    license: null,
+                  },
+                ],
+              }),
+              { status: 200 }
+            )
+          );
+        }
+        if (url === "https://api.x.ai/v1/responses") {
+          return Promise.resolve(new Response(JSON.stringify({ output_text: "ghost/missing" }), { status: 200 }));
+        }
+        if (url === "https://api.github.com/repos/ghost/missing") {
+          return Promise.resolve(new Response("not found", { status: 404 }));
+        }
+        if (url.startsWith("https://gitingest.com/")) {
+          return Promise.resolve(new Response(JSON.stringify({ summary: "x" }), { status: 200 }));
+        }
+        return Promise.resolve(new Response("not found", { status: 404 }));
+      })
+    );
+
+    const context = await loadRepoContext("some vague thing", "test-key");
+    expect(context.repo).toBe("real/something-else");
+  });
+
   it("still accepts a low-star repo if its name matches exactly", async () => {
     // A small but exactly-named repo is still clearly what the caller
     // meant -- the star threshold only applies to non-exact matches.

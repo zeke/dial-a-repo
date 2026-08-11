@@ -170,6 +170,54 @@ Only hit for bare-name input, at most once per such tool call -- fine at
 current volume, worth revisiting (a `GITHUB_TOKEN` secret would raise
 both limits substantially) if this gets called a lot.
 
+## Web-search-backed repo resolution (added 2026-08-11)
+
+GitHub search alone (see "Resolving bare project names" above) only
+matches on the repo's own name, so a fuzzy description ("the pi coding
+agent," "that terminal file manager in Rust") lands on a plausible but
+wrong low-star repo instead of the real, well-known project. Bare-name
+resolution now runs **two lookups in parallel** and combines them
+(`resolveRepoByName` in `src/repoTool.ts`):
+
+1. `githubSearchCandidates` -- the existing GitHub search (fast, free,
+   weak on descriptions).
+2. `webSearchRepo` -- xAI's `web_search` tool scoped to `github.com`,
+   which turns a fuzzy description into an `owner/repo` far better, at
+   the cost of a slow, paid model call.
+
+**Priority:** an exact GitHub name match wins outright (a caller who
+says "react" clearly means `react/react` -- free, unambiguous, and the
+web result is never even verified). Otherwise a web-search result wins
+over GitHub's non-exact guesses (that's the case GitHub gets wrong), but
+**only after** verifying it exists via `GET /repos/{owner}/{repo}` -- a
+web search can name a moved or hallucinated repo. Falls back to GitHub's
+top hit if it clears `MIN_STARS_FOR_FUZZY_MATCH`, else reports a miss.
+
+**How it's wired:** `loadRepoContext` and `resolveCloneTarget` now take
+an optional `apiKey` (threaded from `this.env.XAI_API_KEY` in
+`callSession.ts`). Web search is skipped entirely when no key is passed
+-- which is why the pre-existing `repoTool.test.ts` cases (which don't
+pass a key) still exercise the pure-GitHub path unchanged. The new
+web-search tests pass a dummy key and stub `https://api.x.ai/v1/responses`.
+
+**API shape** (verified against docs.x.ai, not memory): `POST
+https://api.x.ai/v1/responses` with `{ model, input: [{role,content}],
+tools: [{ type: "web_search", filters: { allowed_domains: ["github.com"] }}]}`.
+The answer text is in the `output` array's message item
+(`content[].type === "output_text"`), with an `output_text` convenience
+field handled too. Reuses `XAI_API_KEY` -- no new secret, no new search
+vendor, no new dependency.
+
+**Latency + cost, accepted deliberately:** `WEB_SEARCH_MODEL` is
+`grok-4.5` (a reasoning model with web_search -- several seconds per
+call) with a `WEB_SEARCH_TIMEOUT_MS` (12s) `AbortController` guard so a
+slow/hanging search falls back to GitHub instead of stalling the whole
+tool call. It only fires for bare-name/description input GitHub couldn't
+match exactly, not for direct `owner/repo` or URLs. Swap the model for a
+cheaper/faster one if it proves good enough. Not verified against a live
+call yet (no `XAI_API_KEY` locally at build time) -- the request/response
+shape is from docs, so confirm on the first real call via `wrangler tail`.
+
 ## Real git tooling (added 2026-08-08)
 
 `load_repo`'s gitingest digest is a flat, truncated snapshot -- fine for

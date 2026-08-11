@@ -26,12 +26,12 @@ tell me about," "I don't know the owner but," or "it's called." "the Py coding a
 to the most popular matching public repo on its own (e.g. "react" -> react/react) -- don't guess or
 supply the owner yourself, a wrong guess fails where the tool's own resolution would have succeeded.
 
-A vague description ("the thing that does X") is much less likely to resolve than an actual project
-name -- if the caller doesn't seem to know the exact name, ask them for it or for the "owner/repo"
-rather than passing your best paraphrase of a whole sentence into the tool. If the tool comes back
-saying it couldn't confidently match the name, say so plainly and ask the caller to repeat or spell
-the name -- don't fall back to describing an obscure, likely-wrong repo just because the tool found
-something.
+The tools resolve a bare name or a short description by combining a GitHub search with a web search,
+so a rough description ("the pi coding agent," "that terminal file manager in Rust") can still
+resolve even when the caller doesn't know the exact name -- pass a concise name or descriptive
+phrase, not a whole rambling sentence with filler. If the tool comes back saying it couldn't
+confidently match the name, say so plainly and ask the caller to repeat or spell the name -- don't
+fall back to describing an obscure, likely-wrong repo just because the tool found something.
 
 Base what you say on the tool's data -- your training data about any specific repo may be stale or
 wrong, so don't describe a repo's internals from memory alone once you have real tool data to work
@@ -321,7 +321,7 @@ export class CallSession extends DurableObject<Env> {
   private async runLoadRepo(args: Record<string, unknown>) {
     const repo = str(args.repo);
     if (!repo) return { error: "missing repo" };
-    return loadRepoContext(repo);
+    return loadRepoContext(repo, this.env.XAI_API_KEY);
   }
 
   /**
@@ -331,7 +331,7 @@ export class CallSession extends DurableObject<Env> {
    * resolution or cloning fails, so callers can return it directly.
    */
   private async getRepoWorkspace(repoInput: string) {
-    const resolved = await resolveCloneTarget(repoInput);
+    const resolved = await resolveCloneTarget(repoInput, this.env.XAI_API_KEY);
     if (!resolved.ok) return { ok: false as const, error: resolved.error };
 
     const stub = this.env.REPO_WORKSPACE.get(this.env.REPO_WORKSPACE.idFromName(resolved.target.repo));
