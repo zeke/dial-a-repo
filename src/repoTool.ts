@@ -274,6 +274,12 @@ function extractResponseText(data: XaiResponse): string {
 async function webSearchRepo(name: string, apiKey: string): Promise<{ owner: string; repo: string } | null> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), WEB_SEARCH_TIMEOUT_MS);
+  const startedAt = Date.now();
+  // Structured log so we can actually see what the web search did on a
+  // live call -- resolved, timed out, HTTP-errored, or found nothing.
+  // Without this the whole path is invisible in `wrangler tail`.
+  const log = (outcome: string, result?: string) =>
+    console.log(JSON.stringify({ msg: "web_search", name, outcome, result, ms: Date.now() - startedAt }));
   try {
     const prompt =
       `A caller to a voice assistant wants to identify a public GitHub repository from this ` +
@@ -290,18 +296,30 @@ async function webSearchRepo(name: string, apiKey: string): Promise<{ owner: str
       }),
       signal: controller.signal,
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      log("http_error", String(resp.status));
+      return null;
+    }
 
     const text = extractResponseText(await resp.json<XaiResponse>());
-    if (!text || /^none\b/i.test(text)) return null;
+    if (!text || /^none\b/i.test(text)) {
+      log("no_match");
+      return null;
+    }
 
     // The model was told to answer with just "owner/repo", but be lenient:
     // pull the first owner/repo (or github.com/owner/repo) token out of
     // whatever it returned.
     const match = text.replace(/[`*]/g, "").match(/(?:github\.com\/)?([\w.-]+)\/([\w.-]+)/);
-    if (!match) return null;
-    return { owner: match[1], repo: match[2].replace(/\.git$/, "") };
-  } catch {
+    if (!match) {
+      log("unparseable", text.slice(0, 80));
+      return null;
+    }
+    const found = { owner: match[1], repo: match[2].replace(/\.git$/, "") };
+    log("resolved", `${found.owner}/${found.repo}`);
+    return found;
+  } catch (err) {
+    log(controller.signal.aborted ? "timeout" : "error", controller.signal.aborted ? undefined : String(err));
     return null;
   } finally {
     clearTimeout(timeout);

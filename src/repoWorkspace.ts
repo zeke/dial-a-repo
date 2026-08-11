@@ -2,15 +2,26 @@ import { DurableObject } from "cloudflare:workers";
 import { type DurableObjectStorageLike, getWorkspace, withWorkspace } from "@cloudflare/computer";
 import { type CommitView, type GitClient, createGitClient } from "@cloudflare/computer/git";
 
-// Guard against cloning something huge live on a public phone call. Most
-// interesting repos to talk about are well under this; a repo bigger than
-// this still works fine with load_repo's flat digest, it just doesn't get
-// real git history/file access.
-const MAX_REPO_SIZE_KB = 200_000; // ~200 MB
+// The real protection against OOM-ing the ~128 MB isolate mid-call. This
+// is GitHub's `size` field (the repo's full on-disk size including
+// history); it correlates loosely with clone memory, so the threshold is
+// deliberately conservative. Calibrated from real calls: cloudflare/computer
+// (~3.9 MB) clones and serves git history fine; earendil-works/pi (~60 MB)
+// OOM'd even at depth 20 with no working-tree checkout (see CLONE_DEPTH).
+// 30 MB sits well above the former and well below the latter -- a coarse
+// line (no data points in between) that gets a big repo the friendly
+// decline below instead of crashing the call. Over this, load_repo's flat
+// digest still works, just not real git history/file access.
+const MAX_REPO_SIZE_KB = 30_000; // ~30 MB
 
-// Shallow clone -- enough history for "what changed recently" without
-// pulling an entire project's history over the wire mid-call.
-const CLONE_DEPTH = 200;
+// Shallow clone depth. Kept small as basic hygiene, but note it is NOT
+// what prevents OOM: a live call proved earendil-works/pi still OOM'd at
+// depth 20, because per @cloudflare/computer's GitCloneOptions docs even
+// depth 1 fetches every blob reachable from the tip tree, and isomorphic-git
+// indexes that whole pack in memory. Depth only trims *historical*
+// versions -- enough for "what changed recently" on the small repos the
+// size guard above actually lets through.
+const CLONE_DEPTH = 20;
 
 // Re-clone/pull isn't worth doing on every call for a repo this DO has
 // already cloned -- only refresh if the last sync is older than this.
@@ -20,9 +31,10 @@ const REFRESH_AFTER_MS = 15 * 60 * 1000;
 const MAX_LOG_RESULTS = 20;
 // How far back to walk when the caller asks for a time window (e.g. "in
 // the last month") rather than a fixed count -- isomorphic-git's log
-// doesn't support --since, so this is filtered client-side after a
-// deeper-than-usual walk.
-const LOG_DEPTH_FOR_TIME_WINDOW = 500;
+// doesn't support --since, so this is filtered client-side. Bounded by
+// CLONE_DEPTH: the shallow clone simply has no commits deeper than that,
+// so a time window can't see further back than the clone reaches.
+const LOG_DEPTH_FOR_TIME_WINDOW = CLONE_DEPTH;
 
 const MAX_FILE_CHARS = 20_000;
 const MAX_DIFF_CHARS = 8_000;
@@ -101,7 +113,17 @@ export class RepoWorkspace extends withWorkspace(
     const alreadyCloned = await this.hasClone(ws);
     if (!alreadyCloned) {
       try {
-        await typedGit(ws).clone({ url: cloneUrl, ref: defaultBranch, depth: CLONE_DEPTH, singleBranch: true });
+        // paths: [] skips materializing the working tree in the VFS --
+        // .git/ is still fully populated, and every read op below
+        // (log, catFile by oid, diff by ref) works from the object
+        // database, not a checked-out tree. Saves memory and storage.
+        await typedGit(ws).clone({
+          url: cloneUrl,
+          ref: defaultBranch,
+          depth: CLONE_DEPTH,
+          singleBranch: true,
+          paths: [],
+        });
       } catch (err) {
         return { ok: false, error: `Could not clone this repo: ${String(err)}` };
       }
