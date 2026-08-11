@@ -157,7 +157,7 @@ disambiguation flow around -- out of scope for what this demo needs.
 
 **Interacts with the size guard:** resolving "react" finds `react/react`
 at ~1 GB (`size` field), well over `RepoWorkspace`'s `MAX_REPO_SIZE_KB`
-(~200 MB) -- so `load_repo("react")` works fine (gitingest handles the
+(~30 MB on this branch, was ~200 MB) -- so `load_repo("react")` works fine (gitingest handles the
 digest, truncated as always), but `repo_recent_commits("react")` etc.
 correctly refuse to clone it live on a call. That's the guard doing its
 job, not a new bug, but worth knowing if a caller asks about a huge
@@ -218,6 +218,44 @@ cheaper/faster one if it proves good enough. Not verified against a live
 call yet (no `XAI_API_KEY` locally at build time) -- the request/response
 shape is from docs, so confirm on the first real call via `wrangler tail`.
 
+**Live-call findings (2026-08-11), still open -- read before merging this
+branch.** Two real calls were made against this branch deployed to prod
+(prod was then rolled back to `main`; this branch is unmerged, kept for
+reference):
+
+- **Web search is not confirmed working, and may be timing out.** On
+  `call_id 09392d4c-9789-486c-9e8e-ccac069738f4`, "Pi coding agent"
+  (a description GitHub can't name-match) did **not** resolve to
+  `earendil-works/pi` -- it fell to a low-confidence GitHub miss
+  (`dnouri/pi-coding-agent`, 252 stars, below `MIN_STARS_FOR_FUZZY_MATCH`).
+  What actually found the repo was the bare word "Pi" via GitHub's exact
+  name match (repo literally named `pi`, 87k stars), not web search at
+  all. Likeliest cause: `grok-4.5` reasoning + web_search exceeded the
+  12s `WEB_SEARCH_TIMEOUT_MS` abort, so `webSearchRepo` returned null and
+  we fell back to GitHub. It had **no logging**, so this was invisible --
+  fixed by the structured `web_search` log line (outcome =
+  `resolved`/`timeout`/`no_match`/`http_error`/`unparseable` + `ms`).
+  **Next: make one test call describing pi as "the pi coding agent" and
+  read the `web_search` log to confirm whether it's a timeout.** If so,
+  the fix is a faster resolution path -- a non-reasoning/faster model, or
+  a lower reasoning effort (verify the `/v1/responses` param against
+  docs.x.ai first, don't guess it), *not* a longer timeout (that just
+  makes the on-call pause worse). Owner wants it faster regardless.
+- **The clone OOM is size-bound, not depth-bound.** `cloudflare/computer`
+  (~3.9 MB `size`) clones and serves `repo_recent_commits` fine;
+  `earendil-works/pi` (~60 MB) OOM'd the ~128 MB isolate on
+  `ensureCloned` (`outcome: exceededMemory`) **even at `CLONE_DEPTH` 20
+  with `paths: []`** (no working-tree checkout). Confirms the package
+  docs: isomorphic-git fetches every blob reachable from the tip tree
+  regardless of depth and indexes the whole pack in memory. So depth and
+  checkout-skipping don't save a big repo -- only the size guard does.
+  `MAX_REPO_SIZE_KB` lowered 200 MB -> 30 MB so a repo like pi gets the
+  friendly "too large to clone live" decline instead of crashing the
+  call. The model already degrades gracefully ("the clone might be too
+  big"). 30 MB is a coarse line: cloudflare/computer (3.9 MB) works, pi
+  (60 MB) crashes, no data points in between -- revisit if it's rejecting
+  clonable repos or still letting crashers through.
+
 ## Real git tooling (added 2026-08-08)
 
 `load_repo`'s gitingest digest is a flat, truncated snapshot -- fine for
@@ -248,7 +286,7 @@ devDependencies.
 
 **Caching, not per-call cloning.** `RepoWorkspace` is keyed by repo slug
 (`owner/repo`), not `call_id` -- `ensureCloned()` clones once (shallow,
-`depth: 200`, guarded by `MAX_REPO_SIZE_KB` so nobody can make it clone
+`depth: 20` on this branch, guarded by `MAX_REPO_SIZE_KB` so nobody can make it clone
 "torvalds/linux" live on a call) and reuses that same clone for every
 future call about that repo, refreshing with a fast-forward `pull` if
 the last sync is older than `REFRESH_AFTER_MS` (15 min). First call
@@ -518,6 +556,8 @@ secrets or hit the real xAI/GitHub/gitingest APIs (tests that exercise
   real traffic -- revisit if it's rejecting things it shouldn't, or
   accepting things it shouldn't.
 - `RepoWorkspace`'s freshness policy (`REFRESH_AFTER_MS`, 15 min) and
-  size guard (`MAX_REPO_SIZE_KB`, ~200 MB) are untested guesses about
-  what's reasonable for a live phone call -- revisit if either turns out
-  to be too aggressive or too loose in practice.
+  size guard (`MAX_REPO_SIZE_KB`, ~30 MB on this branch) are untested
+  guesses about what's reasonable for a live phone call -- revisit if
+  either turns out to be too aggressive or too loose in practice. See
+  the "Live-call findings (2026-08-11)" block above for how the 30 MB
+  figure was calibrated.
