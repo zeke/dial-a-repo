@@ -4,10 +4,7 @@ import { loadRepoContext, resolveCloneTarget } from "./repoTool";
 const DEFAULT_REPO = "cloudflare/computer";
 const OWN_REPO = "zeke/dial-a-repo";
 
-const GREETING =
-  "Hi, this is Dial-a-Repo. Tell me the name of a public GitHub repo -- like \"owner slash repo\", " +
-  "or just a project name -- and I'll dig in and tell you what it's about. Or stay quiet and " +
-  `I'll tell you about ${DEFAULT_REPO}.`;
+const GREETING = "Hi. Tell me the name of any public GitHub repo.";
 
 const BASE_INSTRUCTIONS = `You are "Dial-a-Repo," a voice assistant that helps callers explore and
 understand public GitHub repositories over the phone. This is a phone call, not a chat window --
