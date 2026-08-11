@@ -130,25 +130,28 @@ commands, provider setup, and every gotcha found along the way.
 ## Mentioning a repo without knowing its owner
 
 You don't need to know a project's exact GitHub namespace -- "react,"
-"vite," or "cheerio" work fine, not just "facebook/react" or
-"vitejs/vite." Every repo tool resolves a bare name (no `/`) to the
-most popular matching public repo via GitHub's search API
-(`GET /search/repositories?q={name}+in:name+fork:false&sort=stars`),
-preferring an exact name match among the top results and falling back
-to the single top hit by stars otherwise.
+"vite," or a rough description like "the pi coding agent" work fine, not
+just "facebook/react" or "vitejs/vite." Every repo tool resolves a bare
+name (no `/`) by running two lookups in parallel and combining them:
+GitHub's search API
+(`GET /search/repositories?q={name}+in:name+fork:false&sort=stars`) and
+a `github.com`-scoped web search (xAI's `web_search` tool). GitHub
+search only matches on a repo's own name, so it's weak on descriptions;
+the web search is much better at turning a fuzzy description into the
+repo people actually mean. An exact GitHub name match wins outright;
+otherwise a web-search result wins over GitHub's non-exact guesses, but
+only after confirming the repo really exists.
 
-A non-exact match has to clear a minimum star count (`MIN_STARS_FOR_FUZZY_MATCH`
-in `src/repoTool.ts`) to be treated as a real answer -- describing a project
-you're not familiar with by name ("tell me about the Py coding agent")
-is much less likely to resolve than an exact one ("react"), and a weak
-token-overlap match on a rambling description shouldn't be described with
-the same confidence as an exact match. Below that threshold, the tool
-returns an error naming the closest match it found instead of describing
-it as if it were correct. This is a best-effort match, not guaranteed, for
-generic or ambiguous names (e.g. "docker" doesn't resolve to a single
-obvious repo -- there isn't one). See `searchRepoByName` in
+A GitHub non-exact match still has to clear a minimum star count
+(`MIN_STARS_FOR_FUZZY_MATCH` in `src/repoTool.ts`) to be treated as a
+real answer, so a weak token-overlap match on a rambling description
+isn't described with the same confidence as an exact match. If nothing
+clears the bar, the tool returns an error naming the closest match it
+found instead of describing it as if it were correct. This is still
+best-effort, not guaranteed. See `resolveRepoByName` in
 `src/repoTool.ts`, and "A real bug found on a live call: search had no
-confidence threshold" in `AGENTS.md` for the failure that motivated this.
+confidence threshold" in `AGENTS.md` for the failure that motivated the
+star threshold.
 
 Recency isn't factored in at all yet -- "popular and *new*" isn't
 supported, only star-sorted popularity.
@@ -158,8 +161,9 @@ supported, only star-sorted popularity.
 One tool, kept deliberately simple and read-only: no shell access, no
 cloning, no arbitrary code execution reachable from a public phone
 number. When the model calls `load_repo(repo)`, the Durable Object makes
-two requests in parallel (or, for a bare name, one search request that
-returns the same metadata a direct lookup would):
+two requests in parallel (for a bare name or description, the metadata
+comes from resolution first -- see "Mentioning a repo without knowing
+its owner" above):
 
 1. **GitHub's REST API** (`GET /repos/{owner}/{repo}`) for metadata --
    description, language, stars, forks, license, topics.
