@@ -6,268 +6,185 @@
 
 Pick up your phone and talk to any public GitHub repository.
 
-Call **+1 (607) 365-4321** (a US phone number) and tell it about a public
-GitHub repo -- a name, an `owner/repo`, or a full URL. It'll dig in and have
-a real, spoken conversation with you about what it is and how it works. Not
-sure what to ask about? Just stay quiet after the greeting and it'll default
-to talking about [`cloudflare/computer`](https://github.com/cloudflare/computer).
+Call [**+1 (607) 365-4321**](tel:+16073654321) (a US phone number) and tell
+it about a public GitHub repo, a name or an `owner/repo`. It'll dig in and
+have a real, spoken conversation with you about what it is and how it works,
+in whichever language you speak to it in. Not sure what to ask about? Just
+stay quiet after the greeting and it'll default to talking about
+[`cloudflare/computer`](https://github.com/cloudflare/computer).
 
 This is an open-source demo and reference implementation for building
-**voice agents on Cloudflare** that can make and receive real phone calls --
+**voice agents on Cloudflare** that can make and receive real phone calls,
 not a chatbot with a phone number bolted on. It's meant to be forked and
 adapted, not just used.
 
 ## What it does
 
-You call the number, and an AI answers with a real-time voice conversation --
+You call the number, and an AI answers with a real-time voice conversation:
 natural back-and-forth, interruptions, turn-taking, no pre-recorded menu
 tree. Mention a public GitHub repository, and it calls a tool mid-call to
 fetch real, current data about that repo (not a guess from stale training
 data), then talks you through what it is, what stack it uses, and how it's
 structured.
 
-None of this needs Twilio Media Streams, manual audio codec handling, or
-WebRTC -- [xAI's SIP infrastructure](https://docs.x.ai/developers/model-capabilities/audio/voice-agent/sip)
-bridges the phone call's audio directly, so the Worker's job is limited to
-configuring the session and reacting to events, never touching raw audio.
-
-## How it works
-
-```
-caller dials +1 (607) 365-4321
-  -> SignalWire (SIP trunk) forwards the call via SIP to xAI
-  -> xAI sends a signed webhook to this Worker
-  -> Worker verifies the webhook and hands the call to a Durable Object
-     keyed by the call's own id
-  -> the Durable Object opens a WebSocket to xAI's realtime API,
-     configures the session (voice, instructions, four repo tools),
-     and relays events for the life of the call
-  -> when the caller mentions a repo, the model calls load_repo, which
-     fetches GitHub's API + a gitingest.com digest in parallel and
-     hands real repo content back to the model to talk from
-  -> for deeper questions ("what changed last month," "show me this
-     file," "diff that commit"), the model calls one of three tools
-     backed by a real git clone -- see "Real git, no container" below
-```
-
-A [Durable Object](https://developers.cloudflare.com/durable-objects/) holds
-the call open because a plain Worker's background-task budget
-(`ctx.waitUntil()`) isn't built to sustain a multi-minute phone call.
-
-See [AGENTS.md](./AGENTS.md) for the full architecture writeup, exact
-commands, provider setup, and every gotcha found along the way.
-
 ## Stack
 
 - [xAI Voice Agent API](https://docs.x.ai/developers/model-capabilities/audio/voice-agent)
-  (beta) -- the AI on the call. A realtime, bidirectional WebSocket API:
+  (beta): the AI on the call. A realtime, bidirectional WebSocket API:
   send it audio and configuration, it sends back audio, transcripts, and
   events. It handles speech-to-text, text-to-speech, voice-activity
   detection, and tool/function calling, and also runs xAI's SIP telephony
-  layer, which is what makes the "no audio code" part possible -- xAI
-  bridges the phone call's actual audio directly, so this project never
-  touches raw audio bytes, only JSON control events over a WebSocket.
-- [Cloudflare Workers](https://developers.cloudflare.com/workers/) -- the
+  layer, which bridges the phone call's actual audio directly, so this
+  project never touches raw audio bytes, only JSON control events over a
+  WebSocket.
+- [Cloudflare Workers](https://developers.cloudflare.com/workers/): the
   front door. A single Worker (`src/index.ts`) receives xAI's incoming call
   webhook, verifies its signature, and dispatches to a Durable Object.
-- [Cloudflare Durable Objects](https://developers.cloudflare.com/durable-objects/) --
+- [Cloudflare Durable Objects](https://developers.cloudflare.com/durable-objects/):
   the part that makes a multi-minute phone call possible on a platform
   built around short-lived requests. One `CallSession` Durable Object
   instance exists per call, and stays alive for as long as the call's
   WebSocket to xAI is open, independent of the webhook request that
   spawned it.
-- [SignalWire](https://signalwire.com) -- the telephony provider. It owns
-  the phone number and the SIP trunk that connects it to xAI for inbound
-  calls.
-- [GitHub's REST API](https://docs.github.com/en/rest) and
-  [gitingest](https://github.com/coderamp-labs/gitingest) -- how the
-  `load_repo` tool gets real data about a repo. See "The load_repo tool"
-  below.
-- [`@cloudflare/computer`](https://github.com/cloudflare/computer) -- a
+- [SignalWire](https://signalwire.com): the telephony provider. It owns
+  the phone number and forwards inbound calls over SIP to xAI. It's used
+  because xAI's own provisioned numbers don't currently support
+  webhook-based routing, so the number itself has to come from a
+  third-party SIP provider instead.
+- [`@cloudflare/computer`](https://github.com/cloudflare/computer): a
   persistent, SQLite-backed virtual filesystem for Durable Objects, used
-  here for its git client (`isomorphic-git`, pure JS, no shell or
-  container needed) so the model can clone a repo and answer questions
-  a flat digest can't. See "Real git, no container" below.
+  here for its git client so the model can clone a repo and answer
+  questions a flat digest can't. See "Tools" below.
+- [GitHub's REST API](https://docs.github.com/en/rest) and
+  [gitingest](https://github.com/coderamp-labs/gitingest): how the
+  `load_repo` tool gets real data about a repo. See "Tools" below.
 
-## Anatomy of a call
+## How it Works
 
-1. A caller dials +1 (607) 365-4321. SignalWire's SIP Gateway resource
-   forwards the call over SIP to xAI's SIP endpoint.
-2. xAI sends a signed `realtime.call.incoming` webhook to the Worker's
-   `/xai/incoming` route, carrying a `call_id`.
-3. The Worker verifies the webhook's signature -- a Standard Webhooks
-   HMAC that proves the request genuinely came from xAI -- and rejects
-   anything invalid, unsigned, or older than five minutes.
-4. The Worker hands the call off to a `CallSession` Durable Object, keyed
-   by `call_id`, and immediately responds "ok" to xAI. Everything from
-   here on happens inside the Durable Object, independent of that webhook
-   request's lifetime.
-5. The Durable Object opens a WebSocket to xAI's realtime API and sends a
-   `session.update` event: which voice to use, automatic server-side
+1. A caller dials the number. SignalWire's SIP Gateway resource forwards
+   the call over SIP to xAI's SIP endpoint.
+2. xAI sends a signed webhook to the Worker announcing the incoming call.
+3. The Worker verifies the webhook's signature, a Standard Webhooks HMAC
+   that proves the request genuinely came from xAI, and rejects anything
+   invalid, unsigned, or too old.
+4. The Worker hands the call off to a dedicated Durable Object for that
+   call, and immediately acknowledges the webhook so xAI doesn't retry.
+   Everything from here on happens inside the Durable Object, independent
+   of that webhook request's lifetime. A Durable Object holds the call
+   open because a plain Worker's background-task budget isn't built to
+   sustain a multi-minute phone call.
+5. The Durable Object opens a WebSocket to xAI's realtime API and
+   configures the session: which voice to use, automatic server-side
    voice-activity detection (so the model knows when the caller has
-   finished a turn, or is interrupting it mid-sentence), the `load_repo`
-   tool definition, and the speech-to-text model for transcription.
-6. The greeting is sent separately, as a `force_message` -- a scripted
-   line played back verbatim through text-to-speech, not something the
-   model composes on the fly. Prompting the model to "say exactly this
-   and nothing else" turned out to be unreliable in practice (it kept
-   adding filler); a `force_message` guarantees the exact wording.
+   finished a turn, or is interrupting it mid-sentence), the four repo
+   tools available to it (see "Tools" below), and transcription for the
+   caller's side of the conversation.
+6. The greeting is sent separately, as a scripted line played back
+   verbatim through text-to-speech, not something the model composes on
+   the fly. Prompting the model to "say exactly this and nothing else"
+   turned out to be unreliable in practice, it kept adding filler, so a
+   scripted greeting guarantees the exact wording.
 7. From there the conversation runs on its own: xAI's servers handle
    voice-activity detection, transcription, and turn-taking automatically.
    The Durable Object listens for events (transcripts, tool calls, errors)
    as they arrive.
-8. When the caller mentions a repo, the model calls `load_repo`, or one
-   of the three git-backed tools (see "Real git, no container" below).
-   The Durable Object runs it, sends the result back as a
-   `function_call_output`, and triggers a `response.create` so the model
-   speaks about what it found.
-9. When either side hangs up, the WebSocket closes and the `CallSession`
-   Durable Object is done -- it doesn't persist conversation history
-   (see "Extra credit" below for what that would take). A cloned repo's
-   *own* Durable Object, on the other hand, sticks around and gets reused
-   by the next call about that repo -- see below.
+8. When the caller mentions a repo, the model calls one of the four repo
+   tools (see "Tools" below). The Durable Object runs it and sends the
+   result back so the model can speak about what it found.
+9. When either side hangs up, the call's Durable Object is done. It
+   doesn't persist conversation history (see "Extra credit" below for
+   what that would take). A cloned repo's own Durable Object, on the
+   other hand, sticks around and gets reused by the next call about that
+   repo.
 
-## Mentioning a repo without knowing its owner
+## Tools
 
-You don't need to know a project's exact GitHub namespace -- "react,"
-"vite," or "cheerio" work fine, not just "facebook/react" or
-"vitejs/vite." Every repo tool resolves a bare name (no `/`) to the
-most popular matching public repo via GitHub's search API
-(`GET /search/repositories?q={name}+in:name+fork:false&sort=stars`),
-preferring an exact name match among the top results and falling back
-to the single top hit by stars otherwise.
+The model has four tools available on every call:
 
-A non-exact match has to clear a minimum star count (`MIN_STARS_FOR_FUZZY_MATCH`
-in `src/repoTool.ts`) to be treated as a real answer -- describing a project
-you're not familiar with by name ("tell me about the Py coding agent")
-is much less likely to resolve than an exact one ("react"), and a weak
-token-overlap match on a rambling description shouldn't be described with
-the same confidence as an exact match. Below that threshold, the tool
-returns an error naming the closest match it found instead of describing
-it as if it were correct. This is a best-effort match, not guaranteed, for
-generic or ambiguous names (e.g. "docker" doesn't resolve to a single
-obvious repo -- there isn't one). See `searchRepoByName` in
-`src/repoTool.ts`, and "A real bug found on a live call: search had no
-confidence threshold" in `AGENTS.md` for the failure that motivated this.
-
-Recency isn't factored in at all yet -- "popular and *new*" isn't
-supported, only star-sorted popularity.
-
-## The `load_repo` tool
-
-One tool, kept deliberately simple and read-only: no shell access, no
-cloning, no arbitrary code execution reachable from a public phone
-number. When the model calls `load_repo(repo)`, the Durable Object makes
-two requests in parallel (or, for a bare name, one search request that
-returns the same metadata a direct lookup would):
-
-1. **GitHub's REST API** (`GET /repos/{owner}/{repo}`) for metadata --
-   description, language, stars, forks, license, topics.
-2. **[gitingest](https://github.com/coderamp-labs/gitingest)'s** hosted
-   API (`gitingest.com`, 15k+ GitHub stars, actively maintained) for a
-   pre-filtered digest of the repo's file tree and contents -- one call
-   gets "the whole repo, efficiently," instead of the model browsing
-   files one at a time.
-
-The tree and content are each hard-truncated independently (see
-`MAX_TREE_CHARS` / `MAX_CONTENT_CHARS` in `src/repoTool.ts`) before
-being handed back to the model, so a huge monorepo can't blow up the
-context or the call's latency -- a phone conversation needs a summary to
-talk from, not an entire repo's source. They're capped separately rather
-than as one combined budget because a large repo's file tree alone can
-exceed a single shared budget on its own, which is exactly what caused a
-real bug on a live call -- see `AGENTS.md` for the story.
-
-**Dependency note:** `gitingest.com`'s `/api/{owner}/{repo}` endpoint
-isn't an officially documented public API -- it's how gitingest's own web
-frontend works, reverse-engineered from its (also open source) server
-code. It's a well-known, actively maintained tool, and using its hosted
-instance is the simplest option for a demo. Self-hosting gitingest
-(it's a Python app, distributed as a Docker image) would remove that
-external dependency, at the cost of running a whole extra service --
-deliberately left out to keep this demo focused. If that endpoint ever
-disappears or starts rate-limiting hard, that's the tool to swap out.
-
-## Real git, no container
-
-`load_repo`'s digest is a flat, truncated snapshot -- great for "what is
-this and how does it work," not enough for "what changed last month" or
-"show me this whole file." Three more tools answer those by working
-against a **real git clone**, not another flat API call:
-
-- **`repo_recent_commits(repo, limit?, sinceDays?)`** -- commit history,
-  either a fixed count or a time window ("what's changed in the last
-  month").
-- **`repo_file(repo, path, ref?)`** -- one file's full content, at HEAD
-  or a specific commit/branch/tag, not truncated the way `load_repo`'s
+- **`load_repo(repo)`**: fetches metadata (description, language, stars,
+  license, topics) from GitHub's REST API and a pre-filtered digest of
+  the repo's file tree and contents from gitingest, in parallel. This is
+  the first tool called whenever a caller mentions a repo. It actually
+  calls out to gitingest.com at request time, the digest isn't optional
+  or a fallback, `load_repo` depends on it for real file content.
+- **`repo_recent_commits(repo, limit?, sinceDays?)`**: commit history
+  from a real git clone, either a fixed count or a time window ("what's
+  changed in the last month").
+- **`repo_file(repo, path, ref?)`**: one file's full content, at HEAD or
+  a specific commit, branch, or tag, not truncated the way `load_repo`'s
   digest might be.
-- **`repo_diff(repo, from, to?, path?)`** -- a unified diff between two
-  refs, e.g. `from="HEAD~1"` for "what changed in the last commit."
+- **`repo_diff(repo, from, to?, path?)`**: a unified diff between two
+  refs in a real git clone, e.g. `from="HEAD~1"` for "what changed in the
+  last commit."
 
-All three are backed by a `RepoWorkspace` Durable Object
-(`src/repoWorkspace.ts`) using
-[`@cloudflare/computer`](https://github.com/cloudflare/computer)'s git
-client -- which is [`isomorphic-git`](https://github.com/isomorphic-git/isomorphic-git),
-a pure-JS git implementation, "operating directly on the local SQLite
-VFS -- no backend or shell required" per its docs. That's the key thing
-that makes this possible without a container: no `git` binary, no Worker
-Loader, no `experimental` compatibility flag, just `nodejs_compat` and a
-Durable Object.
+All four accept a repo as `"owner/repo"`, a full `github.com` URL, or a
+bare project name with no owner (e.g. "react," "vite," "cheerio"). Bare
+names are resolved to the most popular matching public repo via GitHub's
+search API. See `AGENTS.md` for how that resolution works and its known
+sharp edges.
 
-`RepoWorkspace` is keyed by repo slug (`owner/repo`), not by call --
-once anyone asks about a repo, it's cloned (shallow, capped at ~200 MB)
-and cached there for every future call about that repo, refreshed with a
-fast-forward pull if the last sync is more than 15 minutes old. Cloning
-a repo nobody's asked about yet takes a few seconds; every call after
-that is fast.
+`load_repo` is read-only and deliberately simple: no shell access, no
+arbitrary code execution reachable from a public phone number. Its tree
+and content are each hard-truncated independently (see `MAX_TREE_CHARS`
+and `MAX_CONTENT_CHARS` in `src/repoTool.ts`) before being handed back to
+the model, so a huge monorepo can't blow up the context or the call's
+latency.
 
-**This is a deliberate stress test of a preview package.**
-`@cloudflare/computer`'s own README says plainly: "PREVIEW ONLY... NOT
-suitable for production use at this time." Using it here anyway, on a
-publicly callable phone number, is intentional -- issues found get filed
-upstream (see [cloudflare/computer#89](https://github.com/cloudflare/computer/issues/89)
+The other three tools work against a real git clone rather than a flat
+API call, via a `RepoWorkspace` Durable Object (`src/repoWorkspace.ts`)
+that clones the repo the first time anyone asks about it and reuses that
+clone for every future call, refreshing it periodically. That clone runs
+through [`@cloudflare/computer`](https://github.com/cloudflare/computer)'s
+git client, `isomorphic-git`, a pure-JS implementation that operates
+directly on a Durable Object's own SQLite storage. No container, no
+`git` binary, and no shell are required. `@cloudflare/computer` itself
+supports several execution backends, including full Linux containers,
+but this project doesn't need one: the git work here happens without
+any execution backend at all, which is even lighter than the V8-isolate
+backends `@cloudflare/computer` offers as its container-free option.
+
+This is a deliberate stress test of a preview package: `@cloudflare/computer`'s
+own README says plainly it's "PREVIEW ONLY... NOT suitable for
+production use at this time." Using it here anyway, on a publicly
+callable phone number, is intentional, issues found get filed upstream
+(see [cloudflare/computer#89](https://github.com/cloudflare/computer/issues/89)
 for one found and worked around while building this: `git.revParse`
 doesn't resolve abbreviated commit oids despite its own docs describing
 that as supported).
 
-## Why SignalWire
-
-xAI's own provisioned phone numbers don't currently support webhook-based
-routing (see AGENTS.md), so the phone number itself comes from a
-third-party SIP provider instead. SignalWire owns the number and forwards
-inbound calls over SIP directly to xAI -- this Worker never talks to
-SignalWire at all for inbound calls, only xAI's webhook.
+**Dependency note:** `gitingest.com`'s `/api/{owner}/{repo}` endpoint
+isn't an officially documented public API, it's how gitingest's own web
+frontend works, reverse-engineered from its (also open source) server
+code. It's a well-known, actively maintained tool, and using its hosted
+instance is the simplest option for a demo. Self-hosting gitingest (it's
+a Python app, distributed as a Docker image) would remove that external
+dependency, at the cost of running a whole extra service, deliberately
+left out to keep this demo focused. If that endpoint ever disappears or
+starts rate-limiting hard, that's the tool to swap out.
 
 ## Extra credit
 
 This project is deliberately narrow: a handful of read-only repo tools,
-no conversation memory, no per-caller identity. A sibling project,
-[ziki-voice-agent](https://github.com/zeke/ziki-voice-agent), is the
-private, personal voice-agent project this one was extracted from, and
-still has these features working if you want to see how they're built:
+no conversation memory, no per-caller identity. Here are some ideas on
+how you could extend it:
 
-- **Cross-call memory** -- keying the `CallSession` Durable Object by the
-  caller's phone number (not `call_id`) so the same instance, and its
-  SQLite storage, persists a rolling summary of past conversations across
-  calls.
-- **Per-caller personas** -- a hardcoded phone-number-to-persona lookup
-  table, so known callers get a personalized greeting.
-- **Outbound calling** -- placing a call *from* the agent's number to a
-  known number via SignalWire's Compatibility API, then bridging the
+- **Cross-call memory**: key the `CallSession` Durable Object by the
+  caller's phone number instead of the call's own id, so the same
+  instance, and its SQLite storage, can persist a rolling summary of past
+  conversations across calls.
+- **Per-caller personas**: a phone-number-to-persona lookup table, so
+  known callers get a personalized greeting.
+- **Outbound calling**: place a call *from* the agent's number to a
+  known number via SignalWire's Compatibility API, then bridge the
   answered call into the same SIP destination inbound calls use, so it
   looks like a normal inbound call to xAI once answered.
-- **A general-purpose shell/exec tool** -- giving the model an actual
-  shell (via `@cloudflare/computer`'s worker-shell backend) to run
-  arbitrary commands in a persistent workspace, not just the narrow,
-  read-only git operations this project exposes.
+- **A general-purpose shell/exec tool**: give the model an actual shell
+  (via `@cloudflare/computer`'s worker-shell backend) to run arbitrary
+  commands in a persistent workspace, instead of the narrow, read-only
+  git operations this project exposes.
 
-Any of these would be reasonable things to add here too -- they're just
-not what this demo is about.
+None of these are implemented here, they're just not what this demo is
+about.
 
-## Multilingual
-
-The underlying model supports 20+ languages out of the box -- it detects
-which language the caller is speaking and responds in kind automatically,
-with no per-call configuration needed (see xAI's
-[Supported Languages](https://docs.x.ai/developers/model-capabilities/audio/voice-agent)
-docs for the full list).
+See [AGENTS.md](./AGENTS.md) for the full architecture writeup, exact
+commands, provider setup, and every gotcha found along the way.
