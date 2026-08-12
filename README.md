@@ -176,49 +176,10 @@ agent.
 > Use this repo for reference: https://github.com/zeke/dial-a-repo
 > ```
 
-Or, to run this exact project yourself, here's the rough outline:
-
-1. **Clone and install.**
-
-   ```bash
-   git clone https://github.com/zeke/dial-a-repo.git
-   cd dial-a-repo
-   npm install
-   ```
-
-2. **Get an xAI API key** from the [xAI console](https://console.x.ai). This
-   is what authenticates the outbound realtime WebSocket and (optionally)
-   powers web-search-based repo resolution.
-
-3. **Get a phone number that can forward calls to xAI over SIP.** xAI's own
-   provisioned numbers don't currently support webhook-based routing, so
-   the number has to come from a third-party SIP provider. This project
-   uses [SignalWire](https://signalwire.com)'s SIP Gateway resource,
-   pointed at `sip:+1XXXXXXXXXX@sip.voice.x.ai;transport=tls`. Any
-   provider that can forward SIP to that endpoint should work.
-
-4. **Register the number with xAI** as a `byo_trunk` origin, with its
-   webhook pointed at `https://<your-worker>.workers.dev/xai/incoming`.
-   This step returns a `dispatchSigningSecret` -- copy it immediately,
-   it's only ever shown once.
-
-5. **Point `wrangler.jsonc` at your own Cloudflare account.** Replace
-   `account_id` with yours (`wrangler whoami` will show it).
-
-6. **Set your secrets and deploy.**
-
-   ```bash
-   npx wrangler secret put XAI_API_KEY
-   npx wrangler secret put XAI_WEBHOOK_SECRET
-   npx wrangler deploy
-   ```
-
-For local development, put both values in a `.env` file instead (used by
-`wrangler dev` and by `npx wrangler types`, which needs to run once before
-typecheck/lint/test will pick up the `Env` type). See
-[AGENTS.md](./AGENTS.md) for the exact provisioning steps, every gotcha
-hit along the way, and how to reuse an existing number if you're moving
-it from another project.
+Want to run this exact project instead? See [AGENTS.md](./AGENTS.md) for
+the full setup: getting an xAI API key, wiring up a SIP-forwarding phone
+number, registering the webhook, secrets, and deploying, plus every
+gotcha hit along the way.
 
 ## Extra credit
 
