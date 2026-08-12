@@ -12,7 +12,7 @@
     "lint": "eslint ."
   },
   "keywords": ["cloudflare-workers", "voice-agent", "durable-objects", "xai", "github"],
-  "author": "",
+  "author": "Zeke Sikelianos <zeke@sikelianos.com>",
   "license": "MIT",
   "type": "module",
   "devDependencies": {
