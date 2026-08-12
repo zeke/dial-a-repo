@@ -274,6 +274,56 @@ providers, etc.). Reusing it here means:
   is gone from it. Not yet sourced -- see that project's own
   `AGENTS.md`.
 
+## Setting up a fresh instance (no existing number)
+
+Everything above ("Reusing the existing phone number") assumes a
+SignalWire SIP Gateway resource already exists and just needs its
+webhook repointed. Starting from nothing means creating that resource,
+registering it as a `byo_trunk` origin with xAI, and wiring up secrets:
+
+1. **Get an xAI API key.** Sign up at the [xAI console](https://console.x.ai).
+   This authenticates the outbound realtime WebSocket
+   (`wss://api.x.ai/v1/realtime`) and, if you set it, powers
+   web-search-based repo resolution (see `webSearchRepo` in
+   `src/repoTool.ts`).
+
+2. **Get a phone number that can forward calls to xAI over SIP.** xAI's
+   own provisioned numbers don't currently support webhook-based
+   routing, so the number has to come from a third-party SIP provider
+   that can forward to xAI's fixed SIP endpoint
+   (`sip:+1XXXXXXXXXX@sip.voice.x.ai;transport=tls`, substituting your
+   own number). This project uses a SignalWire SIP Gateway resource for
+   that. **Gap, not yet documented here:** the exact steps to create a
+   *new* SignalWire SIP Gateway resource and buy a number from scratch
+   aren't captured in this repo -- the only provisioning history that
+   exists is in `ziki-voice-agent`'s own (private) `AGENTS.md`, from
+   when that project first set this up. If you provision one from
+   scratch, capture the steps here for the next person.
+
+3. **Register the number with xAI** as a `byo_trunk` origin, with its
+   webhook pointed at `https://<your-worker>.workers.dev/xai/incoming`.
+   See "Reusing the existing phone number" above for the exact API
+   shape (`POST /v2/phone-numbers` with a `webhook.url` field) and the
+   gotcha about `dispatchSigningSecret` only ever being returned once,
+   at creation -- capture it immediately and set it as
+   `XAI_WEBHOOK_SECRET` (see step 5), or you'll have to delete and
+   recreate the registration just to see it again.
+
+4. **Point `wrangler.jsonc` at your own Cloudflare account.** Replace
+   `account_id` with yours (`npx wrangler whoami` shows it).
+
+5. **Set secrets and deploy.**
+
+   ```bash
+   npx wrangler secret put XAI_API_KEY
+   npx wrangler secret put XAI_WEBHOOK_SECRET
+   npx wrangler deploy
+   ```
+
+   For local development (`npx wrangler dev`), put both values in a
+   `.env` file instead -- see "Reminders" below for why `npx wrangler
+   types` also depends on that file existing.
+
 ## Two real Worker bugs (carried over from ziki-voice-agent, still apply)
 
 1. **`fetch("wss://...")` throws.** Cloudflare Workers' outbound

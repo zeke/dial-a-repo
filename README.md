@@ -54,10 +54,10 @@ structured.
 - [`@cloudflare/computer`](https://github.com/cloudflare/computer): a
   persistent, SQLite-backed virtual filesystem for Durable Objects, used
   here for its git client so the model can clone a repo and answer
-  questions a flat digest can't. See "Tools" below.
+  questions a flat digest can't.
 - [GitHub's REST API](https://docs.github.com/en/rest) and
   [gitingest](https://github.com/coderamp-labs/gitingest): how the
-  `load_repo` tool gets real data about a repo. See "Tools" below.
+  `load_repo` tool gets real data about a repo.
 
 ## How it Works
 
@@ -77,8 +77,8 @@ structured.
    configures the session: which voice to use, automatic server-side
    voice-activity detection (so the model knows when the caller has
    finished a turn, or is interrupting it mid-sentence), the four repo
-   tools available to it (see "Tools" below), and transcription for the
-   caller's side of the conversation.
+   tools available to it, and transcription for the caller's side of the
+   conversation.
 6. The greeting is sent separately, as a scripted line played back
    verbatim through text-to-speech, not something the model composes on
    the fly. Prompting the model to "say exactly this and nothing else"
@@ -89,78 +89,32 @@ structured.
    The Durable Object listens for events (transcripts, tool calls, errors)
    as they arrive.
 8. When the caller mentions a repo, the model calls one of the four repo
-   tools (see "Tools" below). The Durable Object runs it and sends the
-   result back so the model can speak about what it found.
+   tools. The Durable Object runs it and sends the result back so the
+   model can speak about what it found.
 9. When either side hangs up, the call's Durable Object is done. It
    doesn't persist conversation history (see "Extra credit" below for
    what that would take). A cloned repo's own Durable Object, on the
    other hand, sticks around and gets reused by the next call about that
    repo.
 
-## Tools
+## Running your own instance
 
-The model has four tools available on every call:
+This is meant to be forked, not just used. Easiest way: hand this repo
+to a coding agent as reference and have it build you a different voice
+agent.
 
-- **`load_repo(repo)`**: fetches metadata (description, language, stars,
-  license, topics) from GitHub's REST API and a pre-filtered digest of
-  the repo's file tree and contents from gitingest, in parallel. This is
-  the first tool called whenever a caller mentions a repo. It actually
-  calls out to gitingest.com at request time, the digest isn't optional
-  or a fallback, `load_repo` depends on it for real file content.
-- **`repo_recent_commits(repo, limit?, sinceDays?)`**: commit history
-  from a real git clone, either a fixed count or a time window ("what's
-  changed in the last month").
-- **`repo_file(repo, path, ref?)`**: one file's full content, at HEAD or
-  a specific commit, branch, or tag, not truncated the way `load_repo`'s
-  digest might be.
-- **`repo_diff(repo, from, to?, path?)`**: a unified diff between two
-  refs in a real git clone, e.g. `from="HEAD~1"` for "what changed in the
-  last commit."
+> Copy this and paste it into your agent:
+>
+> ```
+> Let's build a voice agent that can make and receive real phone calls!
+>
+> Use this repo for reference: https://github.com/zeke/dial-a-repo
+> ```
 
-All four accept a repo as `"owner/repo"`, a full `github.com` URL, or a
-bare project name with no owner (e.g. "react," "vite," "cheerio"). Bare
-names are resolved to the most popular matching public repo via GitHub's
-search API. See `AGENTS.md` for how that resolution works and its known
-sharp edges.
-
-`load_repo` is read-only and deliberately simple: no shell access, no
-arbitrary code execution reachable from a public phone number. Its tree
-and content are each hard-truncated independently (see `MAX_TREE_CHARS`
-and `MAX_CONTENT_CHARS` in `src/repoTool.ts`) before being handed back to
-the model, so a huge monorepo can't blow up the context or the call's
-latency.
-
-The other three tools work against a real git clone rather than a flat
-API call, via a `RepoWorkspace` Durable Object (`src/repoWorkspace.ts`)
-that clones the repo the first time anyone asks about it and reuses that
-clone for every future call, refreshing it periodically. That clone runs
-through [`@cloudflare/computer`](https://github.com/cloudflare/computer)'s
-git client, `isomorphic-git`, a pure-JS implementation that operates
-directly on a Durable Object's own SQLite storage. No container, no
-`git` binary, and no shell are required. `@cloudflare/computer` itself
-supports several execution backends, including full Linux containers,
-but this project doesn't need one: the git work here happens without
-any execution backend at all, which is even lighter than the V8-isolate
-backends `@cloudflare/computer` offers as its container-free option.
-
-This is a deliberate stress test of a preview package: `@cloudflare/computer`'s
-own README says plainly it's "PREVIEW ONLY... NOT suitable for
-production use at this time." Using it here anyway, on a publicly
-callable phone number, is intentional, issues found get filed upstream
-(see [cloudflare/computer#89](https://github.com/cloudflare/computer/issues/89)
-for one found and worked around while building this: `git.revParse`
-doesn't resolve abbreviated commit oids despite its own docs describing
-that as supported).
-
-**Dependency note:** `gitingest.com`'s `/api/{owner}/{repo}` endpoint
-isn't an officially documented public API, it's how gitingest's own web
-frontend works, reverse-engineered from its (also open source) server
-code. It's a well-known, actively maintained tool, and using its hosted
-instance is the simplest option for a demo. Self-hosting gitingest (it's
-a Python app, distributed as a Docker image) would remove that external
-dependency, at the cost of running a whole extra service, deliberately
-left out to keep this demo focused. If that endpoint ever disappears or
-starts rate-limiting hard, that's the tool to swap out.
+Want to run this exact project instead? See [AGENTS.md](./AGENTS.md) for
+the full setup: getting an xAI API key, wiring up a SIP-forwarding phone
+number, registering the webhook, secrets, and deploying, plus every
+gotcha hit along the way.
 
 ## Extra credit
 
