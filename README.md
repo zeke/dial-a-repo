@@ -164,7 +164,19 @@ starts rate-limiting hard, that's the tool to swap out.
 
 ## Running your own instance
 
-This is meant to be forked, not just used. Rough outline:
+This is meant to be forked, not just used. Easiest way: hand this repo
+to a coding agent as reference and have it build you a different voice
+agent.
+
+> Copy this and paste it into your agent:
+>
+> ```
+> Let's build a voice agent that can make and receive real phone calls!
+>
+> Use this repo for reference: https://github.com/zeke/dial-a-repo
+> ```
+
+Or, to run this exact project yourself, here's the rough outline:
 
 1. **Clone and install.**
 
@@ -207,17 +219,6 @@ typecheck/lint/test will pick up the `Env` type). See
 [AGENTS.md](./AGENTS.md) for the exact provisioning steps, every gotcha
 hit along the way, and how to reuse an existing number if you're moving
 it from another project.
-
-Or, skip building it yourself and have a coding agent build you a
-different voice agent using this one as reference:
-
-> Copy this and paste it into your agent:
->
-> ```
-> Let's build a voice agent that can make and receive real phone calls!
->
-> Use this repo for reference: https://github.com/zeke/dial-a-repo
-> ```
 
 ## Extra credit
 
