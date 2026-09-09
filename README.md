@@ -36,7 +36,16 @@ structured.
   detection, and tool/function calling, and also runs xAI's SIP telephony
   layer, which bridges the phone call's actual audio directly, so this
   project never touches raw audio bytes, only JSON control events over a
-  WebSocket.
+  WebSocket. It's one end-to-end speech-to-speech model, not a
+  speech-to-text, LLM and text-to-speech chain stitched together. The
+  session sets a voice (`celeste`) but doesn't name a model, so calls
+  run on xAI's default: the `grok-voice-latest` alias, which has pointed
+  at `grok-voice-think-fast-2.0` since August 5, 2026. To pin a specific
+  release instead, pass it as a `model` query parameter on the realtime
+  URL. `grok-transcribe` is configured separately and only transcribes
+  the caller's side, mostly so conversations are readable in
+  `wrangler tail`. Nothing configures a spoken language, the model just
+  answers in whatever language the caller speaks.
 - [Cloudflare Workers](https://developers.cloudflare.com/workers/): the
   front door. A single Worker (`src/index.ts`) receives xAI's incoming call
   webhook, verifies its signature, and dispatches to a Durable Object.
