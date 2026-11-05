@@ -49,6 +49,8 @@ caller dials +1 (607) 365-4321 (SignalWire number)
      realtime.call.incoming webhook to this Worker's /xai/incoming route
   -> Worker verifies the Standard Webhooks signature and hands the call
      off to a CallSession Durable Object keyed by call_id
+  -> CallSession checks the caller's and global daily talk-time budgets
+     (CallBudget Durable Objects, see "Call limits" below)
   -> The Durable Object opens wss://api.x.ai/v1/realtime?call_id=..., sends
      session.update (voice, instructions, four repo tools) + a
      force_message greeting, and stays alive relaying events for the
@@ -77,12 +79,16 @@ SignalWire's SIP Gateway resource doesn't need to change at all.
    parses the event, and ignores anything that isn't
    `realtime.call.incoming` (but still returns 200 so xAI doesn't retry
    forever).
-3. Hands the call to a `CallSession` Durable Object keyed by `call_id`
-   (not caller identity -- this project doesn't persist anything across
-   calls) and returns 200 immediately.
+3. Reduces the SIP `From` header to a caller key (`callerKey()` in
+   `src/callBudget.ts`), hands the call to a `CallSession` Durable Object
+   keyed by `call_id` (not caller identity -- this project doesn't
+   persist conversations across calls), and returns 200 immediately.
 
 `src/callSession.ts` -- `CallSession.run`, per call:
 
+0. Works out how long the call may run (see "Call limits" below). With
+   less than `MIN_CALL_SECONDS` left, it plays a limit message, hangs up,
+   and skips everything else.
 1. Opens an outbound WebSocket to xAI's realtime API with the API key as
    a bearer token. Note: `fetch()` with a `wss://` URL throws in
    Workers -- use `https://` with an `Upgrade: websocket` header instead
@@ -443,6 +449,37 @@ Cloudflare's Workers Observability logs after the fact. What worked:
   `\xa0` with a plain space) was more robust than trying to parse the
   whole body.
 
+## Call limits (added 2026-11-05)
+
+Added after the number got heavy off-label use: about 1,860 minutes in
+a month, almost all from two callers using it as a free Hebrew voice
+assistant (general advice, and live translation of English videos held
+up to the phone). All usage billed to the shared xAI key.
+
+- `src/callBudget.ts` holds the limits and the `CallBudget` Durable
+  Object: a per-UTC-day seconds ledger. One instance per caller key plus
+  one `"global"` instance. `MAX_CALL_SECONDS` (10 min) per call,
+  `CALLER_DAILY_SECONDS` (20 min) per caller, `GLOBAL_DAILY_SECONDS`
+  (120 min) across all callers.
+- Withheld caller IDs (missing header, `anonymous`, or all zeros like
+  `+10000000000`, which SignalWire really sends) share one `anonymous`
+  ledger, so hiding your number doesn't reset your budget.
+- `CallSession.run` speaks a one-minute warning, then a goodbye at the
+  limit, both as `force_message`, and hangs up `GOODBYE_GRACE_MS` later
+  via `POST /v1/realtime/calls/{call_id}/hangup` (documented in xAI's
+  SIP docs, "Call control"), then closes the socket.
+- Usage is recorded when the call ends, so simultaneous calls from one
+  caller can overlap a budget. Accepted: each is still bounded by
+  `MAX_CALL_SECONDS`, and the global ledger bounds the total.
+- The model also has an `end_call` tool. The prompt tells it to refuse
+  off-topic requests (advice, translation, news, personas), offer repos
+  instead, and hang up if the caller keeps declining.
+  `handleFunctionCall` special-cases `end_call`: no
+  `function_call_output`/`response.create`, or the model would talk
+  again after its goodbye.
+- Tune the numbers in `src/callBudget.ts`. Look for `call_budget` and
+  `call_usage` log lines in Workers Observability.
+
 ## Greeting reliability: prompting isn't enough, use force_message
 
 Prompting the model to "say exactly this and nothing else" is not
@@ -505,10 +542,8 @@ secrets or hit the real xAI/GitHub/gitingest APIs (tests that exercise
   the thing to replace in `src/repoTool.ts` -- consider GitHub's tree API
   (`git/trees?recursive=1`) plus selective file fetches as a fallback
   that only depends on GitHub itself.
-- Consider a rate limit or abuse guard now that this is meant to be
-  publicly callable (no `key=`-gated debug/admin routes exist here at
-  all, intentionally -- there's nothing to gate). This matters more now
-  that a public caller can trigger a real git clone, not just API GETs.
+- Talk-time limits exist now (see "Call limits"), but nothing limits
+  how many git clones a caller can trigger within their budget.
 - If cloudflare/computer#89 (short-oid revParse) gets fixed upstream,
   reconsider whether `recentCommits` should go back to short oids for
   nicer spoken/logged output.
