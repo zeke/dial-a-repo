@@ -414,6 +414,15 @@ examples of how people actually phrase this.
 
 ### Reading past call logs (no transcript persistence in this project)
 
+- `CLOUDFLARE_API_TOKEN_GENERAL` works for the telemetry query API
+  (`queryId` plus inline `parameters.filters`, `view: "events"`).
+- Logs from a call's Durable Object only show up after the call ends.
+  Long calls also lose their middle once the 256 KB per-request log
+  limit is hit, which happens after about 2 to 3 minutes.
+- To test end to end without a phone, start a call through SignalWire's
+  Compatibility API from the Rubber Duck number (+13412645678), passing
+  the script directly in the `Laml` parameter (`<Say>`/`<Pause>`).
+
 This project intentionally persists nothing (see "Extra credit" in the
 README), so reconstructing what happened on a real call means reading
 Cloudflare's Workers Observability logs after the fact. What worked:
