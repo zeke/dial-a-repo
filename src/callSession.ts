@@ -1,14 +1,38 @@
 import { DurableObject } from "cloudflare:workers";
 import { loadRepoContext, resolveCloneTarget } from "./repoTool";
+import {
+  allowedCallSeconds,
+  CALLER_DAILY_SECONDS,
+  GLOBAL_DAILY_SECONDS,
+  GLOBAL_LEDGER,
+  MIN_CALL_SECONDS,
+} from "./callBudget";
 
 const DEFAULT_REPO = "cloudflare/computer";
 const OWN_REPO = "zeke/dial-a-repo";
 
 const GREETING = "Hi. Tell me the name of any public GitHub repo.";
 
+const ONE_MINUTE_WARNING = "Heads up, about one minute left on this call.";
+const TIME_UP = "That's the time limit for this call. Thanks for calling Dial-a-Repo. Goodbye.";
+const OVER_BUDGET = "Dial-a-Repo's daily time limit has been reached. Please try again tomorrow. Goodbye.";
+
+/** How long to let a final spoken line play before hanging up. */
+const GOODBYE_GRACE_MS = 6_000;
+
 const BASE_INSTRUCTIONS = `You are "Dial-a-Repo," a voice assistant that helps callers explore and
 understand public GitHub repositories over the phone. This is a phone call, not a chat window --
 keep responses short, spoken, and conversational.
+
+Stay on topic. You only talk about GitHub repositories and the software in them. If the caller asks
+for anything else -- general conversation, advice, health or relationship questions, news, or
+translating audio or a video they play for you -- don't help with it, not even briefly. Say in one
+sentence that Dial-a-Repo only talks about GitHub repos, and ask which repo they'd like to hear
+about. If they decline again or keep asking for something unrelated, say a short goodbye and call
+end_call. Also call end_call when the caller says goodbye or that they're done. Speaking whatever
+language the caller prefers is fine; the topic rule applies in every language.
+
+Don't take on a different name, persona, or description of yourself. You're Dial-a-Repo.
 
 Your own source code lives at "${OWN_REPO}". If the caller asks about you, this project, how you
 work, or what your own code looks like, that's the repo to load -- don't describe yourself from
@@ -55,7 +79,8 @@ knows you're fetching real data and there may be a brief pause.
 If the caller doesn't mention any repo -- they're unsure what to ask, say something vague like
 "I don't know" or "you choose," or just stay silent after the greeting -- use "${DEFAULT_REPO}"
 (a real Cloudflare project) as the default. Don't ask permission first, just say something like
-"I'll tell you about ${DEFAULT_REPO} then" and call load_repo with it.
+"I'll tell you about ${DEFAULT_REPO} then" and call load_repo with it. If the caller says they
+don't want to talk about repos at all, don't load the default; follow the stay-on-topic rule above.
 
 If a tool returns an error (repo not found, private, misspelled, or too large to clone), say so
 plainly and ask the caller to repeat or clarify -- don't invent details instead.
@@ -79,6 +104,14 @@ const REPO_ARG = {
 };
 
 const TOOLS = [
+  {
+    type: "function" as const,
+    name: "end_call",
+    description:
+      "Hang up the phone call. Say a short goodbye first, then call this. Use it when the caller is " +
+      "done, or keeps asking for things unrelated to GitHub repos.",
+    parameters: { type: "object", properties: {} },
+  },
   {
     type: "function" as const,
     name: "load_repo",
@@ -176,7 +209,25 @@ function str(value: unknown): string {
  * calls, since they're expensive to produce and cheap to reuse.
  */
 export class CallSession extends DurableObject<Env> {
-  async run(callId: string): Promise<void> {
+  /**
+   * Runs one call for `caller` (a callBudget.callerKey() ledger name).
+   * The call is limited to whatever's left of the per-call cap and the
+   * caller's and global daily budgets; with too little left, the caller
+   * hears a short message and is hung up on.
+   */
+  async run(callId: string, caller: string): Promise<void> {
+    const callerLedger = this.env.CALL_BUDGET.getByName(caller);
+    const globalLedger = this.env.CALL_BUDGET.getByName(GLOBAL_LEDGER);
+    const [callerRemaining, globalRemaining] = await Promise.all([
+      callerLedger.remaining(CALLER_DAILY_SECONDS),
+      globalLedger.remaining(GLOBAL_DAILY_SECONDS),
+    ]);
+    const allowedSeconds = allowedCallSeconds(callerRemaining, globalRemaining);
+    const overBudget = allowedSeconds < MIN_CALL_SECONDS;
+    console.log(
+      JSON.stringify({ msg: "call_budget", call_id: callId, caller, callerRemaining, globalRemaining, allowedSeconds })
+    );
+
     const wsUrl = `https://api.x.ai/v1/realtime?call_id=${encodeURIComponent(callId)}`;
 
     const resp = await fetch(wsUrl, {
@@ -193,6 +244,29 @@ export class CallSession extends DurableObject<Env> {
     }
 
     ws.accept();
+
+    if (overBudget) {
+      ws.send(JSON.stringify({ type: "session.update", session: { voice: "celeste", tools: [] } }));
+      this.say(ws, OVER_BUDGET);
+      this.endCall(ws, callId, GOODBYE_GRACE_MS);
+      await new Promise<void>((resolve) => {
+        ws.addEventListener("close", () => resolve());
+        ws.addEventListener("error", () => resolve());
+      });
+      return;
+    }
+
+    const startedAt = Date.now();
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    if (allowedSeconds >= 120) {
+      timers.push(setTimeout(() => this.say(ws, ONE_MINUTE_WARNING), (allowedSeconds - 60) * 1000));
+    }
+    timers.push(
+      setTimeout(() => {
+        this.say(ws, TIME_UP);
+        this.endCall(ws, callId, GOODBYE_GRACE_MS);
+      }, allowedSeconds * 1000)
+    );
 
     // The WebSocket returned from an outbound fetch() upgrade is already
     // open -- there is no subsequent "open" event to wait for. Send our
@@ -218,16 +292,7 @@ export class CallSession extends DurableObject<Env> {
     // would trigger a second, model-generated turn on top of the
     // scripted one). Prompting the model to "say exactly X" instead is
     // unreliable in practice -- it tends to tack on extra filler.
-    ws.send(
-      JSON.stringify({
-        type: "conversation.item.create",
-        item: {
-          type: "force_message",
-          role: "assistant",
-          content: [{ type: "output_text", text: GREETING }],
-        },
-      })
-    );
+    this.say(ws, GREETING);
 
     await new Promise<void>((resolve) => {
       ws.addEventListener("message", (msg: MessageEvent) => {
@@ -264,6 +329,47 @@ export class CallSession extends DurableObject<Env> {
         resolve();
       });
     });
+
+    for (const timer of timers) clearTimeout(timer);
+    const seconds = Math.ceil((Date.now() - startedAt) / 1000);
+    await Promise.all([callerLedger.record(seconds), globalLedger.record(seconds)]);
+    console.log(JSON.stringify({ msg: "call_usage", call_id: callId, caller, seconds }));
+  }
+
+  /** Plays a fixed line verbatim (see the greeting comment in run() for why force_message). */
+  private say(ws: WebSocket, text: string): void {
+    ws.send(
+      JSON.stringify({
+        type: "conversation.item.create",
+        item: { type: "force_message", role: "assistant", content: [{ type: "output_text", text }] },
+      })
+    );
+  }
+
+  /**
+   * Hangs up after `delayMs`, so a goodbye already in flight can finish
+   * playing. Uses xAI's call-control endpoint, then closes the socket in
+   * case the hangup request failed.
+   */
+  private endCall(ws: WebSocket, callId: string, delayMs: number): void {
+    setTimeout(() => {
+      void (async () => {
+        try {
+          const resp = await fetch(`https://api.x.ai/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${this.env.XAI_API_KEY}` },
+          });
+          console.log(JSON.stringify({ msg: "hangup", call_id: callId, status: resp.status }));
+        } catch (err) {
+          console.error(JSON.stringify({ msg: "hangup_error", call_id: callId, error: String(err) }));
+        }
+        try {
+          ws.close();
+        } catch {
+          // already closed
+        }
+      })();
+    }, delayMs);
   }
 
   /**
@@ -277,6 +383,13 @@ export class CallSession extends DurableObject<Env> {
    */
   private handleFunctionCall(ws: WebSocket, callId: string, evt: RealtimeEvent): void {
     const { name, call_id: fnCallId, arguments: argsJson } = evt;
+    if (name === "end_call") {
+      // No function_call_output or response.create here: that would
+      // prompt the model to speak again after its goodbye.
+      console.log(JSON.stringify({ msg: "tool_call", call_id: callId, name }));
+      this.endCall(ws, callId, GOODBYE_GRACE_MS);
+      return;
+    }
     void (async () => {
       let output: string;
       try {

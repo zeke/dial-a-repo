@@ -12,11 +12,13 @@
   "durable_objects": {
     "bindings": [
       { "name": "CALL_SESSION", "class_name": "CallSession" },
-      { "name": "REPO_WORKSPACE", "class_name": "RepoWorkspace" }
+      { "name": "REPO_WORKSPACE", "class_name": "RepoWorkspace" },
+      { "name": "CALL_BUDGET", "class_name": "CallBudget" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["CallSession"] },
-    { "tag": "v2", "new_sqlite_classes": ["RepoWorkspace"] }
+    { "tag": "v2", "new_sqlite_classes": ["RepoWorkspace"] },
+    { "tag": "v3", "new_sqlite_classes": ["CallBudget"] }
   ]
 }

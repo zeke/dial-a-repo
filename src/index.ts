@@ -1,5 +1,7 @@
 import { readWebhookHeaders, verifyWebhookSignature } from "./webhook";
+import { callerKey } from "./callBudget";
 
+export { CallBudget } from "./callBudget";
 export { CallSession } from "./callSession";
 export { RepoWorkspace } from "./repoWorkspace";
 
@@ -64,16 +66,18 @@ export default {
     const callId = event.data.call_id;
     const fromHeader = event.data.sip_headers?.find((h) => h.name.toLowerCase() === "from");
 
-    console.log(JSON.stringify({ msg: "incoming_call", call_id: callId, from: fromHeader?.value }));
+    const caller = callerKey(fromHeader?.value);
+
+    console.log(JSON.stringify({ msg: "incoming_call", call_id: callId, from: fromHeader?.value, caller }));
 
     // Hand the call off to a Durable Object, which stays alive for the
     // duration of the call independent of this request's waitUntil
     // budget. Keyed by call_id -- this demo doesn't persist anything
     // across calls (see the README's "Extra credit" section for that and
-    // other features intentionally left out), so there's no reason to
-    // key by caller identity here.
+    // other features intentionally left out). The caller identity is
+    // only used for daily time budgets (see callBudget.ts).
     const stub = env.CALL_SESSION.get(env.CALL_SESSION.idFromName(callId));
-    ctx.waitUntil(stub.run(callId));
+    ctx.waitUntil(stub.run(callId, caller));
 
     return new Response("ok", { status: 200 });
   },

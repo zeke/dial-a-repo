@@ -168,3 +168,117 @@ describe("CallSession.handleFunctionCall (git-backed tools)", () => {
     expect(output.commits?.[0].oid).toMatch(/^[0-9a-f]{40}$/);
   }, 30_000);
 });
+
+describe("CallSession end_call", () => {
+  it("hangs up after the goodbye grace period without prompting another response", async () => {
+    const hangups: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        hangups.push(String(input));
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      })
+    );
+    vi.useFakeTimers();
+    try {
+      const stub = env.CALL_SESSION.getByName("call_test_end_call");
+      const sent: string[] = [];
+      let closed = false;
+      const fakeWs = {
+        send: (msg: string) => sent.push(msg),
+        close: () => {
+          closed = true;
+        },
+      } as unknown as WebSocket;
+
+      await runInDurableObject(stub, async (instance: CallSession) => {
+        const withPrivate = instance as unknown as {
+          handleFunctionCall(ws: WebSocket, callId: string, evt: FakeFunctionCallEvent): void;
+        };
+        withPrivate.handleFunctionCall(fakeWs, "call_end_1", {
+          type: "response.function_call_arguments.done",
+          name: "end_call",
+          call_id: "fc_end",
+          arguments: "{}",
+        });
+        expect(hangups).toHaveLength(0);
+        await vi.advanceTimersByTimeAsync(6_000);
+      });
+
+      expect(sent).toHaveLength(0);
+      expect(hangups).toEqual(["https://api.x.ai/v1/realtime/calls/call_end_1/hangup"]);
+      expect(closed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("CallSession.run over budget", () => {
+  it("plays the limit message and hangs up without starting a normal session", async () => {
+    await env.CALL_BUDGET.getByName("+15550000001").record(60 * 60);
+
+    const hangups: string[] = [];
+    const received: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url.endsWith("/hangup")) {
+          hangups.push(url);
+          return Promise.resolve(new Response("{}", { status: 200 }));
+        }
+        const pair = new WebSocketPair();
+        const [client, server] = Object.values(pair);
+        server.accept();
+        server.addEventListener("message", (msg: MessageEvent) => {
+          received.push(JSON.parse(msg.data as string) as Record<string, unknown>);
+        });
+        return Promise.resolve(new Response(null, { status: 101, webSocket: client }));
+      })
+    );
+
+    const stub = env.CALL_SESSION.getByName("call_test_over_budget");
+    await runInDurableObject(stub, (instance: CallSession) => instance.run("call_over_1", "+15550000001"));
+
+    expect(hangups).toEqual(["https://api.x.ai/v1/realtime/calls/call_over_1/hangup"]);
+    const session = received.find((m) => m.type === "session.update")?.session as { tools: unknown[] };
+    expect(session.tools).toEqual([]);
+    const spoken = received
+      .filter((m) => m.type === "conversation.item.create")
+      .map((m) => JSON.stringify(m.item));
+    expect(spoken).toHaveLength(1);
+    expect(spoken[0]).toContain("daily time limit");
+  }, 15_000);
+});
+
+describe("CallSession.run within budget", () => {
+  it("starts a normal session and records the call's duration against both ledgers", async () => {
+    const received: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => {
+        const pair = new WebSocketPair();
+        const [client, server] = Object.values(pair);
+        server.accept();
+        server.addEventListener("message", (msg: MessageEvent) => {
+          received.push(JSON.parse(msg.data as string) as Record<string, unknown>);
+        });
+        // The caller hangs up shortly after the greeting.
+        setTimeout(() => server.close(1000, "bye"), 50);
+        return Promise.resolve(new Response(null, { status: 101, webSocket: client }));
+      })
+    );
+
+    const globalBefore = await env.CALL_BUDGET.getByName("global").remaining(120 * 60);
+    const stub = env.CALL_SESSION.getByName("call_test_normal");
+    await runInDurableObject(stub, (instance: CallSession) => instance.run("call_normal_1", "+15550000002"));
+
+    const session = received.find((m) => m.type === "session.update")?.session as { tools: { name: string }[] };
+    expect(session.tools.map((t) => t.name)).toContain("end_call");
+    expect(JSON.stringify(received.find((m) => m.type === "conversation.item.create"))).toContain("GitHub repo");
+
+    expect(await env.CALL_BUDGET.getByName("+15550000002").remaining(20 * 60)).toBe(20 * 60 - 1);
+    expect(await env.CALL_BUDGET.getByName("global").remaining(120 * 60)).toBe(globalBefore - 1);
+  });
+});

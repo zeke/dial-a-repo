@@ -27,6 +27,10 @@ fetch real, current data about that repo (not a guess from stale training
 data), then talks you through what it is, what stack it uses, and how it's
 structured.
 
+It only talks about GitHub repos. Calls are limited to 10 minutes, and
+each caller gets 20 minutes a day. It's a demo on a personal API key, so
+those limits keep the bill sane.
+
 ## Stack
 
 - [xAI Voice Agent API](https://docs.x.ai/developers/model-capabilities/audio/voice-agent)
@@ -78,7 +82,8 @@ structured.
    voice-activity detection (so the model knows when the caller has
    finished a turn, or is interrupting it mid-sentence), the four repo
    tools available to it, and transcription for the caller's side of the
-   conversation.
+   conversation. Before that, it checks the caller's daily time budget,
+   and turns the call away with a short message if it's used up.
 6. The greeting is sent separately, as a scripted line played back
    verbatim through text-to-speech, not something the model composes on
    the fly. Prompting the model to "say exactly this and nothing else"
@@ -119,7 +124,7 @@ gotcha hit along the way.
 ## Extra credit
 
 This project is deliberately narrow: a handful of read-only repo tools,
-no conversation memory, no per-caller identity. Here are some ideas on
+no conversation memory, and caller identity used only for time limits. Here are some ideas on
 how you could extend it:
 
 - **Cross-call memory**: key the `CallSession` Durable Object by the
